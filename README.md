@@ -11,6 +11,9 @@ A Claude Code plugin that shares your **conversation history and settings** betw
 - If the same conversation was continued on two devices, both versions are kept, the other one as a separate session
 - Check that your project files match the other device (environment-specific files such as `.env` and `node_modules/`, and line-ending differences, are ignored)
 - `/session-share:auto on` pulls when Claude Code starts and pushes when it exits
+- Also shares Claude Code's per-project auto memory (`~/.claude/projects/<project>/memory/`)
+- Detects API keys, tokens and private keys before pushing and masks them as `[REDACTED:<kind>]` (your local copy is untouched)
+- `/session-share:prune` removes old conversations from the sync repository and can squash its git history to reclaim space
 
 Project files themselves are expected to be shared with Git. This plugin only shares Claude Code's own data.
 
@@ -45,6 +48,8 @@ Project files themselves are expected to be shared with Git. This plugin only sh
 | `/session-share:verify` | Check that project files match the device that pushed last |
 | `/session-share:items [add\|remove] <name>` | Add or remove shared settings items (e.g. `add rules`) |
 | `/session-share:auto [on\|off]` | Pull on start / push on exit (per device) |
+| `/session-share:secrets [mask\|warn\|block]` | How to handle secrets found in conversations |
+| `/session-share:prune [--older-than DAYS] [--squash]` | Remove old conversations from the sync repository / squash its history |
 | `/session-share:status` | Show the current state |
 
 ## Using your own git server
@@ -71,13 +76,32 @@ git init --bare /srv/git/claude-sessions.git
 | Shared | Not shared |
 |---|---|
 | Conversation history (from `~/.claude/projects/`, for linked projects only) | Credentials (`.credentials.json`) |
+| Per-project auto memory (`~/.claude/projects/<project>/memory/`) | |
 | `settings.json`, `CLAUDE.md`, `keybindings.json` | `~/.claude.json` (account info etc.) |
 | `agents/`, `commands/`, `skills/`, `output-styles/`, `hooks/` | `settings.local.json` |
 | Extra items you add with `items add`, such as `rules/` | Shell snapshots and other temporary files |
 
 For settings that must differ per OS (such as a statusLine command), put them in `config/settings.windows.json`, `settings.mac.json` or `settings.linux.json` in your sync repository. They override the shared settings on that OS only.
 
+## Secrets
+
+Before anything is pushed, conversations, memory and `settings.json` are scanned for API keys (Anthropic, OpenAI, Google, AWS, Stripe), GitHub/GitLab/Slack tokens, JWTs, private keys and `password=`-style assignments.
+
+- `mask` (default): replace them with `[REDACTED:<kind>]` in the shared copy. Your local files are not modified, and a masked value in `settings.json` never overwrites the real value on a device that has it.
+- `warn`: push as is and report what was found.
+- `block`: do not push conversations that contain secrets.
+
+The setting is stored in the sync repository and applies to every device. Detection is pattern-based and cannot catch everything.
+
 > **Warning**: conversations can contain code and secrets. Always keep the sync repository private.
+
+## Keeping the sync repository small
+
+Every push commits the latest version of each changed conversation, so the repository grows over time.
+
+- `/session-share:prune --older-than 90` removes conversations not touched for 90 days from the sync repository. They stay on each device, and continuing one shares it again.
+- `/session-share:prune --squash` rewrites the repository's history into a single commit (force push) to reclaim space. Other devices follow automatically on their next sync. This fails if the branch is protected against force pushes.
+- `/session-share:status` shows how much space the repository uses.
 
 ## How it works
 
@@ -93,6 +117,7 @@ Sync state is tracked per session as a hash of the last synced version. If only 
 python3 tests/test_paths.py   # path conversion for Windows / macOS / Linux
 bash tests/e2e.sh             # push / pull / conflicts / auto sync between two simulated devices
 bash tests/self_hosted.sh     # a self-hosted HTTPS git server with a self-signed certificate, and moving servers
+bash tests/features.sh        # secret masking, memory sharing, prune and squash
 ```
 
 ## License

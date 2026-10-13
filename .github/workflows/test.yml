@@ -24,3 +24,4 @@ jobs:
           python-version: "3.12"
       - run: bash tests/e2e.sh
       - run: bash tests/self_hosted.sh
+      - run: bash tests/features.sh

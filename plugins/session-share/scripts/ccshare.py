@@ -214,6 +214,65 @@ def sha(s):
     return hashlib.sha256(s.encode("utf-8", "surrogateescape")).hexdigest()
 
 
+# ---------------------------------------------------------------- 秘密情報
+
+SECRET_PATTERNS = [
+    ("秘密鍵", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----")),
+    ("Anthropic API キー", re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}")),
+    ("OpenAI API キー", re.compile(r"sk-(?:proj-|svcacct-)?[A-Za-z0-9_\-]{32,}")),
+    ("GitHub トークン", re.compile(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}")),
+    ("GitLab トークン", re.compile(r"glpat-[A-Za-z0-9_\-]{20,}")),
+    ("AWS アクセスキー", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("Google API キー", re.compile(r"AIza[0-9A-Za-z_\-]{35}")),
+    ("Slack トークン", re.compile(r"xox[abposr]-[A-Za-z0-9\-]{10,}")),
+    ("Stripe キー", re.compile(r"\b(?:sk|rk)_live_[A-Za-z0-9]{20,}")),
+    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")),
+]
+# KEY=値 / "password": "値" のような代入。値がコードらしいもの (関数呼び出しや変数参照) は除く
+SECRET_ASSIGN = re.compile(
+    r"(?i)((?:api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token|password|passwd)"
+    r"[\"']?\s*[:=]\s*[\"']?)([^\s\"'`,;(){}\[\]$<>]{12,})")
+REDACTED = "[REDACTED:{}]"
+
+
+class SecretFilter:
+    """共有先に送る文字列から秘密情報を探す。mode: mask (伏せ字にする) / warn (警告のみ) / block (送らない)"""
+
+    def __init__(self, mode="mask"):
+        self.mode = mode if mode in ("mask", "warn", "block") else "mask"
+        self.found = {}
+
+    def __call__(self, s):
+        if len(s) < 16:
+            return s
+        for kind, pat in SECRET_PATTERNS:
+            if pat.search(s):
+                self.found[kind] = self.found.get(kind, 0) + len(pat.findall(s))
+                if self.mode == "mask":
+                    s = pat.sub(REDACTED.format(kind), s)
+
+        def assign(m):
+            v = m.group(2)
+            if v.startswith("[REDACTED") or not (re.search(r"\d", v) and re.search(r"[A-Za-z]", v)) \
+                    or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+", v):
+                return m.group(0)  # 英字だけ・数字だけの値や process.env.X のような参照は秘密とみなさない
+            self.found["パスワード等の代入"] = self.found.get("パスワード等の代入", 0) + 1
+            return m.group(1) + REDACTED.format("secret") if self.mode == "mask" else m.group(0)
+        return SECRET_ASSIGN.sub(assign, s)
+
+    def summary(self):
+        return ", ".join("{} {}件".format(k, v) for k, v in sorted(self.found.items()))
+
+
+def secret_mode(cfg):
+    return store_options(cfg).get("secrets", "mask")
+
+
+def store_converter(mapper, filt):
+    """ローカル -> 共有先の変換 (パスのプレースホルダ化 + 秘密情報の処理)。"""
+    return lambda o: mapper.walk(o, lambda s: filt(mapper.to_store(s)))
+
+
 # ---------------------------------------------------------------- ストア / バックエンド
 
 def store_path(cfg):
@@ -233,6 +292,8 @@ def store_fetch(cfg):
     if git_store(cfg) and store_has_remote(st):
         if not run(["git", "ls-remote", "--heads", "origin"], cwd=st, check=False).stdout.strip():
             return  # リモートが空 (最初の push 前)
+        if follow_squash(st):
+            return
         r = run(["git", "pull", "--rebase", "--autostash"], cwd=st, check=False)
         unmerged = run(["git", "diff", "--name-only", "--diff-filter=U"], cwd=st, check=False).stdout.strip()
         if unmerged or "CONFLICT" in r.stdout + r.stderr:
@@ -241,6 +302,28 @@ def store_fetch(cfg):
                 st, unmerged or r.stderr.strip()))
         if r.returncode != 0:
             print("警告: ストアの git pull に失敗しました:\n" + r.stderr.strip())
+
+
+def follow_squash(st):
+    """別のデバイスが prune --squash で履歴を作り直していたら、手元のストアをそれに合わせる。
+    ストアの中身は各デバイスの ~/.claude から作り直せるので、手元の未送信分は次の push で送り直される。"""
+    run(["git", "fetch", "-q", "origin"], cwd=st, check=False)
+    branch = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=st).stdout.strip()
+    remote = "origin/" + branch
+    if run(["git", "rev-parse", "--verify", "-q", remote], cwd=st, check=False).returncode != 0:
+        return False
+    theirs = run(["git", "show", remote + ":ccshare.json"], cwd=st, check=False).stdout
+    try:
+        their_epoch = json.loads(theirs).get("history_epoch") if theirs else None
+    except ValueError:
+        their_epoch = None
+    mine = load_json(st / "ccshare.json", {}).get("history_epoch")
+    if their_epoch and their_epoch != mine and \
+            run(["git", "merge-base", "--is-ancestor", "HEAD", remote], cwd=st, check=False).returncode != 0:
+        run(["git", "reset", "-q", "--hard", remote], cwd=st)
+        print("共有先の履歴が整理されていたので、手元のコピーを合わせました。")
+        return True
+    return False
 
 
 def store_commit(cfg, message):
@@ -536,22 +619,149 @@ def state_key(key, sid):
     return "{}/{}".format(key, sid)
 
 
-def push_sessions(cfg, state, key, root):
+def memory_dir(root):
+    """Claude Code がプロジェクトごとに書き溜める自動メモリの場所。"""
+    return claude_dir() / "projects" / encode_project_dir(root) / "memory"
+
+
+def push_memory(cfg, state, key, root):
+    src = memory_dir(root)
+    st = store_path(cfg) / "projects" / safe_key(key) / "memory"
+    if not src.is_dir():
+        return 0, []
+    mapper = PathMapper(root)
+    mode = secret_mode(cfg)
+    mem = state.setdefault("memory", {})
+    pushed, conflicts = 0, []
+    for f in sorted(src.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = str(f.relative_to(src)).replace("\\", "/")
+        if ".from-other-device." in f.name:
+            continue  # 競合時に置いた相手側の版は、このデバイスで確認するためのもの
+        filt = SecretFilter(mode)
+        local = filt(mapper.to_store(read_text(f)))
+        if filt.found and mode == "block":
+            continue
+        L, dst = sha(local), st / rel
+        S = sha(read_text(dst)) if dst.exists() else None
+        B = mem.get(state_key(key, rel))
+        if S == L:
+            mem[state_key(key, rel)] = L
+        elif S is None or S == B:
+            write_text(dst, local)
+            mem[state_key(key, rel)] = L
+            pushed += 1
+        elif L != B:
+            conflicts.append(rel)
+    return pushed, conflicts
+
+
+def pull_memory(cfg, state, key, root):
+    st = store_path(cfg) / "projects" / safe_key(key) / "memory"
+    if not st.is_dir():
+        return 0, []
+    dst_root = memory_dir(root)
+    mapper = PathMapper(root)
+    filt = SecretFilter(secret_mode(cfg))
+    mem = state.setdefault("memory", {})
+    pulled, conflicts = 0, []
+    for f in sorted(st.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = str(f.relative_to(st)).replace("\\", "/")
+        stored = read_text(f)
+        S, B = sha(stored), mem.get(state_key(key, rel))
+        dst = dst_root / rel
+        if dst.exists():
+            L = sha(filt(mapper.to_store(read_text(dst))))
+            if L == S:
+                mem[state_key(key, rel)] = S
+                continue
+            if S == B:
+                continue  # 手元の方が新しい
+            if L != B:
+                # 両方で書き換わっている: 相手側の版を隣に置き、手元はそのまま残す
+                other = dst.with_name(dst.stem + ".from-other-device" + dst.suffix)
+                write_text(other, mapper.to_local(stored))
+                mem[state_key(key, rel)] = S
+                conflicts.append(str(other.name))
+                continue
+        write_text(dst, mapper.to_local(stored))
+        mem[state_key(key, rel)] = S
+        pulled += 1
+    return pulled, conflicts
+
+
+def push_project(cfg, state, key, root):
+    """会話・メモリ・ファイルのマニフェストを送る。結果の表示用の行を返す。"""
+    lines = []
+    secrets = {}
+    n, conflicts = push_sessions(cfg, state, key, root, report=secrets)
+    mn, mconf = push_memory(cfg, state, key, root)
+    m = build_manifest(root)
+    m["device"] = device_id(cfg)
+    save_json(store_path(cfg) / "projects" / safe_key(key) / "manifest.json", m)
+    lines.append("[{}] セッション {} 件・メモリ {} 件を送信、ファイル {} 件のマニフェストを記録".format(
+        key, n, mn, len(m["files"])))
+    if m.get("git") and m["git"].get("dirty"):
+        lines.append("  注意: 未コミットの変更があります。ファイルは Git で別途共有してください。")
+    for sid in conflicts:
+        lines.append("  競合: {} は別のデバイスでも更新されています。先に pull してください。".format(sid))
+    for rel in mconf:
+        lines.append("  競合: メモリ {} は別のデバイスでも更新されています。先に pull してください。".format(rel))
+    mode = secret_mode(cfg)
+    for sid, summary in sorted(secrets.items()):
+        what = {"mask": "伏せ字にして送りました", "warn": "そのまま送りました", "block": "送りませんでした"}[mode]
+        lines.append("  秘密情報: {} に {} が含まれていたため、{}。".format(sid, summary, what))
+    return lines
+
+
+def pull_project(cfg, state, key, root, skip=()):
+    lines = []
+    n, forks = pull_sessions(cfg, state, key, root, skip=skip)
+    mn, mconf = pull_memory(cfg, state, key, root)
+    lines.append("[{}] セッション {} 件・メモリ {} 件を取り込みました ({})".format(key, n, mn, root))
+    for sid, fid in forks:
+        lines.append("  競合: {} は両方で更新されていたため、相手側の版を {} として取り込みました。".format(sid, fid))
+    for name in mconf:
+        lines.append("  競合: メモリが両方で更新されていたため、相手側の版を {} として置きました。内容をまとめてください。".format(name))
+    return lines, n + len(forks) + mn
+
+
+def pruned_ids(cfg, key):
+    return load_json(store_path(cfg) / "projects" / safe_key(key) / "pruned.json", {})
+
+
+def push_sessions(cfg, state, key, root, report=None):
+    """report: 秘密情報が見つかったセッションを {id: 概要} で受け取る dict"""
     st = store_path(cfg) / "projects" / safe_key(key) / "sessions"
     sessions = local_sessions(root)
     mapper = PathMapper(root, aliases=root_aliases(root, [c for _f, c in sessions.values()]))
-    to_store = lambda o: mapper.walk(o, mapper.to_store)
+    mode = secret_mode(cfg)
+    pruned = pruned_ids(cfg, key)
     pushed, conflicts = 0, []
     for sid, (f, _cwd) in sorted(sessions.items()):
+        filt = SecretFilter(mode)
+        to_store = store_converter(mapper, filt)
         local = convert_jsonl(read_text(f), to_store)
         L = sha(local)
         dst = st / (sid + ".jsonl")
         S = sha(read_text(dst)) if dst.exists() else None
         B = state["sessions"].get(state_key(key, sid))
+        if sid in pruned and L == B:
+            continue  # 整理 (prune) 済みで、その後この会話を続けていない
+        if filt.found and report is not None:
+            report[sid] = filt.summary()
+        if filt.found and mode == "block":
+            continue
         if S == L:
             state["sessions"][state_key(key, sid)] = L
             continue
         if S is None or S == B:
+            if sid in pruned:
+                del pruned[sid]  # 整理後に続きを書いた会話は、また共有する
+                save_json(store_path(cfg) / "projects" / safe_key(key) / "pruned.json", pruned)
             write_text(dst, local)
             copy_session_dir(f.with_suffix(""), st / sid, to_store)
             state["sessions"][state_key(key, sid)] = L
@@ -582,7 +792,15 @@ def push_settings(cfg):
                 local = load_json(s, {})
                 overlay = load_json(st / "settings.{}.json".format(os_name()), {})
                 common = load_json(d, {})
-                save_json(d, mapper.walk(strip_overlay(local, overlay, common), mapper.to_store))
+                filt = SecretFilter(secret_mode(cfg))
+                out = store_converter(mapper, filt)(strip_overlay(local, overlay, common))
+                if filt.found and filt.mode == "block":
+                    print("  settings.json に秘密情報らしき値があるため送りませんでした ({})".format(filt.summary()))
+                    continue
+                save_json(d, out)
+                if filt.found:
+                    print("  settings.json に秘密情報らしき値があります ({}): {}".format(
+                        filt.summary(), "伏せ字にして送りました" if filt.mode == "mask" else "そのまま送りました"))
             continue
         if s.is_dir():
             if d.exists():
@@ -623,6 +841,15 @@ def strip_overlay(local, overlay, common):
     return out
 
 
+def keep_redacted(new, local):
+    """共有先で伏せ字になっている値は、手元に本物があればそれを残す。"""
+    if isinstance(new, dict):
+        return {k: keep_redacted(v, local.get(k) if isinstance(local, dict) else None) for k, v in new.items()}
+    if isinstance(new, str) and "[REDACTED:" in new and isinstance(local, str):
+        return local
+    return new
+
+
 def deep_merge(base, over):
     out = dict(base)
     for k, v in over.items():
@@ -656,7 +883,7 @@ def pull_settings(cfg, keep_backups=5):
         if item == "settings.json":
             common = mapper.walk(load_json(s, {}), mapper.to_local)
             overlay = mapper.walk(load_json(st / "settings.{}.json".format(os_name()), {}), mapper.to_local)
-            new = deep_merge(common, overlay)
+            new = keep_redacted(deep_merge(common, overlay), load_json(d, {}))
             if d.exists() and load_json(d, None) == new:
                 continue
         else:
@@ -692,7 +919,7 @@ def pull_sessions(cfg, state, key, root, skip=()):
         return 0, []
     have = local_sessions(root)
     mapper = PathMapper(root, aliases=root_aliases(root, [c for _f, c in have.values()]))
-    to_store = lambda o: mapper.walk(o, mapper.to_store)
+    to_store = store_converter(mapper, SecretFilter(secret_mode(cfg)))
     to_local = lambda o: mapper.walk(o, mapper.to_local)
     pulled, forks = 0, []
     for src in sorted(st.glob("*.jsonl")):
@@ -886,15 +1113,7 @@ def cmd_push(args):
             print("設定は送信しませんでした: 別のデバイスで更新されています。先に pull してください。")
     for key, root in target_projects(cfg, args):
         link_project(cfg, root, key, quiet=True)
-        n, conflicts = push_sessions(cfg, state, key, root)
-        m = build_manifest(root)
-        m["device"] = device_id(cfg)
-        save_json(st / "projects" / safe_key(key) / "manifest.json", m)
-        print("[{}] セッション {} 件を送信、ファイル {} 件のマニフェストを記録".format(key, n, len(m["files"])))
-        if m.get("git") and m["git"].get("dirty"):
-            print("  注意: 未コミットの変更があります。ファイルは Git で別途共有してください。")
-        for sid in conflicts:
-            print("  競合: {} は別のデバイスでも更新されています。先に pull してください。".format(sid))
+        print("\n".join(push_project(cfg, state, key, root)))
     save_state(state)
     store_commit(cfg, "ccshare: push from {} at {}".format(device_id(cfg), now()))
 
@@ -907,10 +1126,8 @@ def cmd_pull(args):
         pull_settings(cfg)
         state["settings_base"] = config_hash(cfg)
     for key, root in target_projects(cfg, args):
-        n, forks = pull_sessions(cfg, state, key, root)
-        print("[{}] セッション {} 件を取り込みました ({})".format(key, n, root))
-        for sid, fid in forks:
-            print("  競合: {} は両方で更新されていたため、相手側の版を {} として取り込みました。".format(sid, fid))
+        lines, _n = pull_project(cfg, state, key, root)
+        print("\n".join(lines))
         report_verify(key, root, store_path(cfg))
     save_state(state)
 
@@ -946,13 +1163,44 @@ def cmd_list(args):
         print("  再開: claude --resume <ID>  (このプロジェクトのディレクトリで)")
 
 
+def dir_size(p):
+    p = Path(p)
+    return sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.is_dir() else 0
+
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return "{:.0f} {}".format(n, unit) if unit == "B" else "{:.1f} {}".format(n, unit)
+        n /= 1024.0
+
+
+def session_last_time(f):
+    text = read_text(f)
+    for line in reversed(text.splitlines()):
+        m = re.search(r'"timestamp":"([^"]+)"', line)
+        if m:
+            try:
+                return datetime.datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
+            except ValueError:
+                break
+    return datetime.datetime.fromtimestamp(f.stat().st_mtime, datetime.timezone.utc)
+
+
 def cmd_status(args):
     cfg = load_config()
+    st = store_path(cfg)
     print("デバイス: {} ({})".format(cfg["device"], os_name()))
     print("ストア:   {} [{}]".format(cfg["store"], cfg.get("backend")))
     print("Claude:   {}".format(claude_dir()))
+    print("秘密情報: {}".format({"mask": "伏せ字にして送る", "warn": "警告のみ", "block": "含む会話は送らない"}[secret_mode(cfg)]))
+    total = dir_size(st)
+    print("共有先の手元コピー: {} (うち git の履歴 {})".format(human(total), human(dir_size(st / ".git"))))
     for key, root in cfg.get("projects", {}).items():
-        print("  {} -> {} (ローカルのセッション {} 件)".format(key, root, len(local_sessions(root))))
+        sd = st / "projects" / safe_key(key) / "sessions"
+        n = len(list(sd.glob("*.jsonl"))) if sd.is_dir() else 0
+        print("  {} -> {} (ローカル {} 件 / 共有先 {} 件, {})".format(
+            key, root, len(local_sessions(root)), n, human(dir_size(sd))))
 
 
 def cmd_items(args):
@@ -982,6 +1230,74 @@ def cmd_items(args):
     rest = [i for i in OPTIONAL_ITEMS if i not in extra]
     if rest:
         print("追加できる例: " + ", ".join(rest))
+
+
+def cmd_secrets(args):
+    """会話を送るときの秘密情報の扱い。共有先に保存されるので全デバイスで共通。"""
+    cfg = load_config()
+    store_fetch(cfg)
+    if args.mode:
+        opts = store_options(cfg)
+        opts["secrets"] = args.mode
+        save_json(store_path(cfg) / "ccshare.json", opts)
+        store_commit(cfg, "ccshare: secrets {} from {}".format(args.mode, device_id(cfg)))
+    mode = secret_mode(cfg)
+    print("秘密情報の扱い: {} ({})".format(mode, {"mask": "見つけた値を [REDACTED:種類] に置き換えて送る",
+                                            "warn": "そのまま送り、警告だけ出す",
+                                            "block": "含む会話は送らない"}[mode]))
+    print("検出する種類: " + ", ".join(k for k, _ in SECRET_PATTERNS) + ", パスワード等の代入")
+
+
+def cmd_prune(args):
+    """共有先から古い会話を外す (各デバイスの手元の会話は消さない)。--squash で git の履歴も作り直して容量を減らす。"""
+    cfg = load_config()
+    store_fetch(cfg)
+    st = store_path(cfg)
+    if args.older_than is None and not args.squash:
+        sys.exit("ccshare: --older-than <日数> か --squash を指定してください。")
+    targets = []
+    if args.older_than is not None:
+        limit = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.older_than)
+        for pd in sorted((st / "projects").glob("*")) if (st / "projects").is_dir() else []:
+            for f in sorted((pd / "sessions").glob("*.jsonl")):
+                if session_last_time(f) < limit:
+                    size = f.stat().st_size + dir_size(f.with_suffix(""))
+                    targets.append((pd, f, size))
+    freed = sum(t[2] for t in targets)
+    print("{} 日より前の会話: {} 件 ({})".format(args.older_than, len(targets), human(freed))
+          if args.older_than is not None else "古い会話の整理はしません。")
+    for pd, f, size in targets[:50]:
+        print("  {}  {}  {}".format(pd.name, f.stem, human(size)))
+    if args.squash:
+        print("git の履歴を作り直します (現在 {})。他のデバイスは次の同期で自動的に合わせます。".format(
+            human(dir_size(st / ".git"))))
+    if args.dry_run:
+        print("(確認のみ。実行するには --dry-run を外してください)")
+        return
+    for pd, f, _size in targets:
+        pruned = load_json(pd / "pruned.json", {})
+        pruned[f.stem] = now()
+        save_json(pd / "pruned.json", pruned)
+        f.unlink()
+        if f.with_suffix("").is_dir():
+            shutil.rmtree(f.with_suffix(""))
+    store_commit(cfg, "ccshare: prune from {} at {}".format(device_id(cfg), now()))
+    if args.squash and git_store(cfg):
+        opts = store_options(cfg)
+        opts["history_epoch"] = str(uuid.uuid4())
+        save_json(st / "ccshare.json", opts)
+        store_commit(cfg, "ccshare: new history epoch")
+        new = run(["git", "commit-tree", "HEAD^{tree}", "-m",
+                   "ccshare: squashed history ({}, {})".format(device_id(cfg), now())], cwd=st).stdout.strip()
+        run(["git", "reset", "-q", "--hard", new], cwd=st)
+        if store_has_remote(st):
+            r = run(["git", "push", "-q", "--force", "-u", "origin", "HEAD"], cwd=st, check=False)
+            if r.returncode != 0:
+                sys.exit("ccshare: 作り直した履歴の push に失敗しました (ブランチ保護で強制 push が禁止されていないか確認):\n"
+                         + r.stderr.strip())
+        run(["git", "reflog", "expire", "--expire=now", "--all"], cwd=st, check=False)
+        run(["git", "gc", "-q", "--prune=now"], cwd=st, check=False)
+        print("履歴を作り直しました。手元のコピー: {}".format(human(dir_size(st))))
 
 
 def cmd_auto(args):
@@ -1016,15 +1332,13 @@ def cmd_hook(args):
         if args.event == "start":
             pull_settings(cfg)
             state["settings_base"] = config_hash(cfg)
-            n, forks = pull_sessions(cfg, state, key, root, skip={data.get("session_id")})
+            lines, n = pull_project(cfg, state, key, root, skip={data.get("session_id")})
             save_state(state)
-            if n or forks:
-                out.write("session-share: 他のデバイスの会話を {} 件取り込みました (/session-share:list で一覧)。\n".format(n + len(forks)))
+            print("\n".join(lines))
+            if n:
+                out.write("session-share: 他のデバイスの会話・メモリを {} 件取り込みました (/session-share:list で一覧)。\n".format(n))
         else:
-            n, conflicts = push_sessions(cfg, state, key, root)
-            m = build_manifest(root)
-            m["device"] = device_id(cfg)
-            save_json(store_path(cfg) / "projects" / safe_key(key) / "manifest.json", m)
+            print("\n".join(push_project(cfg, state, key, root)))
             save_state(state)
             store_commit(cfg, "ccshare: auto push from {} at {}".format(device_id(cfg), now()))
     except BaseException as e:  # noqa
@@ -1063,6 +1377,14 @@ def main():
     a.add_argument("action", nargs="?", choices=["list", "add", "remove"], default="list")
     a.add_argument("name", nargs="?", help="~/.claude 直下の名前 (例: rules)")
     a.set_defaults(fn=cmd_items)
+    a = sp.add_parser("secrets", help="秘密情報の扱い (mask / warn / block)")
+    a.add_argument("mode", nargs="?", choices=["mask", "warn", "block"])
+    a.set_defaults(fn=cmd_secrets)
+    a = sp.add_parser("prune", help="共有先から古い会話を外す / 履歴を作り直して容量を減らす")
+    a.add_argument("--older-than", type=int, metavar="日数")
+    a.add_argument("--squash", action="store_true", help="git の履歴を1つにまとめて容量を減らす")
+    a.add_argument("--dry-run", action="store_true", help="対象を表示するだけ")
+    a.set_defaults(fn=cmd_prune)
     a = sp.add_parser("auto", help="起動時 pull / 終了時 push の自動化 (このデバイス)")
     a.add_argument("state", nargs="?", choices=["on", "off"])
     a.set_defaults(fn=cmd_auto)

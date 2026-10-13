@@ -1,7 +1,7 @@
 """Windows <-> Linux/Mac のパス変換テスト: python3 tests/test_paths.py"""
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "plugins/session-share/scripts"))
-from ccshare import PathMapper, encode_project_dir, normalize_remote
+from ccshare import PathMapper, encode_project_dir, normalize_remote, SecretFilter
 
 win = PathMapper(r"C:\Users\shota\src\demo", r"C:\Users\shota", windows=True)
 lin = PathMapper("/home/shota/work/demo", "/home/shota", windows=False)
@@ -42,4 +42,12 @@ assert normalize_remote("git@github.com:Dpetg/Demo.git") == "github.com/dpetg/de
 assert normalize_remote("me@nas:/srv/git/app.git") == "nas/srv/git/app"
 assert normalize_remote("ssh://nas/~me/app.git") == "nas/app"
 assert normalize_remote(r"C:\git\app.git") == "local/c:/git/app"
+# 秘密情報の検出: 本物らしい値は伏せ、コードや説明文は残す
+f = SecretFilter("mask")
+assert "REDACTED" in f("export OPENAI_API_KEY=sk-proj-" + "Ab3" * 15)
+assert "REDACTED" in f('password = "hunter2hunter2x"')
+assert f("const apiKey = process.env.API_KEY_VALUE;") == "const apiKey = process.env.API_KEY_VALUE;"
+assert f("set ACCESS_TOKEN=proxy-injected-value") == "set ACCESS_TOKEN=proxy-injected-value"
+assert f("token: ${{ secrets.GITHUB_TOKEN }}") == "token: ${{ secrets.GITHUB_TOKEN }}"
+assert "REDACTED" in f("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----")
 print("OK")

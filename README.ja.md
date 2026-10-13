@@ -11,6 +11,9 @@ Windows / macOS / Linux、デュアルブートや複数の PC の間で、Claud
 - 同じ会話を2台で進めてしまっても、どちらも消さずに別の会話として残す
 - プロジェクトのファイルが他のデバイスと一致しているかを確認 (`.env` や `node_modules/` などの環境固有ファイルと改行コードの差は無視)
 - `/session-share:auto on` で、起動時に pull・終了時に push を自動化
+- Claude Code がプロジェクトごとに書き溜める自動メモリ (`~/.claude/projects/<プロジェクト>/memory/`) も共有
+- 送る前に API キー・トークン・秘密鍵を検出し、`[REDACTED:種類]` に置き換える (手元は書き換えない)
+- `/session-share:prune` で共有先から古い会話を外し、git の履歴を作り直して容量を減らせる
 
 プロジェクトのファイル自体は Git で共有する前提です。このプラグインが共有するのは Claude Code 側のデータだけです。
 
@@ -45,6 +48,8 @@ Windows / macOS / Linux、デュアルブートや複数の PC の間で、Claud
 | `/session-share:verify` | ファイルが最後に push したデバイスと一致しているか |
 | `/session-share:items [add\|remove] <名前>` | 共有する設定項目の追加・削除 (例: `add rules`) |
 | `/session-share:auto [on\|off]` | 起動時 pull / 終了時 push の自動化 (デバイスごと) |
+| `/session-share:secrets [mask\|warn\|block]` | 会話に含まれる秘密情報の扱い |
+| `/session-share:prune [--older-than 日数] [--squash]` | 共有先から古い会話を外す / 履歴を作り直す |
 | `/session-share:status` | 状態の確認 |
 
 ## 自分の git サーバを使う
@@ -71,13 +76,32 @@ git init --bare /srv/git/claude-sessions.git
 | 共有する | 共有しない |
 |---|---|
 | 会話履歴 (`~/.claude/projects/` のうち、リンクしたプロジェクトのもの) | 認証情報 (`.credentials.json`) |
+| プロジェクトごとの自動メモリ (`~/.claude/projects/<プロジェクト>/memory/`) | |
 | `settings.json`, `CLAUDE.md`, `keybindings.json` | `~/.claude.json` (アカウント情報など) |
 | `agents/`, `commands/`, `skills/`, `output-styles/`, `hooks/` | `settings.local.json` |
 | `rules/` など (`items add` で追加したもの) | シェルのスナップショットや一時ファイル |
 
 OS ごとに変えたい設定 (statusLine のコマンドなど) は、共有先リポジトリの `config/settings.windows.json` / `settings.mac.json` / `settings.linux.json` に書くと、その OS でだけ上書きされます。
 
+## 秘密情報
+
+送る前に、会話・メモリ・`settings.json` から API キー (Anthropic、OpenAI、Google、AWS、Stripe)、GitHub / GitLab / Slack のトークン、JWT、秘密鍵、`password=` のような代入を検出します。
+
+- `mask` (既定): 共有先に送る版だけ `[REDACTED:種類]` に置き換えます。手元のファイルは書き換えず、`settings.json` の伏せ字が本物の値を持つデバイスの設定を上書きすることもありません。
+- `warn`: そのまま送り、見つかったものを報告します。
+- `block`: 秘密情報を含む会話は送りません。
+
+設定は共有先に保存され、全デバイスに効きます。パターンによる検出なので、すべてを見つけられるわけではありません。
+
 > **注意**: 会話履歴にはコードや秘密情報が含まれることがあります。共有先は必ず private にしてください。
+
+## 共有先の容量を抑える
+
+push のたびに、変わった会話の最新版がコミットされるので、共有先は少しずつ大きくなります。
+
+- `/session-share:prune --older-than 90` で、90 日以上触っていない会話を共有先から外します。各デバイスの手元には残り、その会話を続けると再び共有されます。
+- `/session-share:prune --squash` で、共有先の git の履歴を1つのコミットにまとめて容量を減らします (強制 push)。他のデバイスは次の同期で自動的に合わせます。ブランチ保護で強制 push が禁止されていると失敗します。
+- 使用量は `/session-share:status` で確認できます。
 
 ## 仕組み
 
@@ -93,6 +117,7 @@ session-share は、送るときに会話の中の絶対パス (プロジェク�
 python3 tests/test_paths.py   # Windows / macOS / Linux のパス変換
 bash tests/e2e.sh             # 2台のデバイスを模した push / pull / 競合 / 自動同期
 bash tests/self_hosted.sh     # 自己署名証明書の HTTPS git サーバと、共有先の引っ越し
+bash tests/features.sh        # 秘密情報の伏せ字、メモリの共有、prune と squash
 ```
 
 ## ライセンス
