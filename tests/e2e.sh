@@ -60,7 +60,7 @@ echo '{"type":"user","cwd":"'"$PB"'","sessionId":"s1","message":{"role":"user","
 grep -q "競合" "$T/c.txt" || { echo "FAIL: 競合を検出しない"; exit 1; }
 (cd "$PA" && dev A python3 "$S" pull --no-settings) | tee "$T/c2.txt"
 grep -q "取り込みました。" "$T/c2.txt" || true
-ls "$T/A/home/.claude/projects/$ENC/"*.jsonl | wc -l | grep -q 2 || { echo "FAIL: 分岐が作られない"; exit 1; }
+ls "$T/A/home/.claude/projects/$ENC/"*.jsonl | wc -l | grep 2 >/dev/null || { echo "FAIL: 分岐が作られない"; exit 1; }
 (cd "$PA" && dev A python3 "$S" push --no-settings)
 (cd "$PB" && dev B python3 "$S" pull --no-settings)
 grep -q "A only" "$F" || { echo "FAIL: B に A の版が届かない"; exit 1; }
@@ -82,7 +82,7 @@ echo '{"type":"user","cwd":"'"$PA"'","sessionId":"s2","message":{"role":"user","
 echo '{"type":"user","cwd":"'"$PA"'","sessionId":"s1","message":{"role":"user","content":"A again"}}' >> "$T/A/home/.claude/projects/$ENC/s1.jsonl"
 (cd "$PA" && dev A python3 "$S" push --no-settings) >/dev/null
 OUT=$(echo '{"session_id":"s1","cwd":"'"$PB"'"}' | dev B python3 "$S" hook start 2>"$T/hook.err"); cat "$T/hook.err" >&2
-echo "$OUT" | grep -q "取り込みました" || { echo "FAIL: フックの要約が出ない"; exit 1; }
+echo "$OUT" | grep "取り込みました" >/dev/null || { echo "FAIL: フックの要約が出ない"; exit 1; }
 test -f "$T/B/home/.claude/projects/$ENCB/s2.jsonl" || { echo "FAIL: フックで新しい会話が届かない"; exit 1; }
 grep -q "A again" "$F" && { echo "FAIL: 開いている会話を書き換えた"; exit 1; } || true
 echo '{"cwd":"'"$PB"'"}' | dev B python3 "$S" auto off >/dev/null

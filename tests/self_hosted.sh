@@ -35,7 +35,7 @@ test ! -e "$T/A/home/.ccshare/config.json" || { echo "FAIL: 失敗したのに�
 echo "== --ca-cert で初期化し、2台目で取り込む"
 dev A python3 "$S" init --remote "$URL" --ca-cert "$T/cert.pem" --device devA
 (cd "$T/A/home" && dev A python3 "$S" push)
-git --git-dir="$T/srv/claude-sessions.git" log --oneline | grep -q "push from devA" || { echo "FAIL: サーバに届いていない"; exit 1; }
+git --git-dir="$T/srv/claude-sessions.git" log --oneline | grep "push from devA" >/dev/null || { echo "FAIL: サーバに届いていない"; exit 1; }
 dev B python3 "$S" init --remote "$URL" --ca-cert "$T/cert.pem" --device devB
 (cd "$T/B/home" && dev B python3 "$S" pull)
 grep -q dark "$T/B/home/.claude/settings.json" || { echo "FAIL: B に設定が届かない"; exit 1; }
@@ -48,12 +48,12 @@ git --git-dir="$T/srv/moved.git" log --oneline | grep "push from devA" >/dev/nul
   echo "FAIL: 引っ越し先に履歴が無い"; exit 1; }
 dev B python3 "$S" init --remote "$URL2"   # 2台目も同じ共有先へ切り替えられる
 (cd "$T/B/home" && dev B python3 "$S" pull) >/dev/null
-git -C "$T/B/home/.ccshare/store" log --oneline | grep -q "push from devA" || {
+git -C "$T/B/home/.ccshare/store" log --oneline | grep "push from devA" >/dev/null || {
   git -C "$T/B/home/.ccshare/store" log --oneline --all --decorate; git -C "$T/B/home/.ccshare/store" status
   git --git-dir="$T/srv/moved.git" log --oneline --all --decorate; echo "FAIL: B が引っ越し先を取り込めない"; exit 1; }
 git init -q --bare "$T/srv/other.git"
 git clone -q "$T/srv/other.git" "$T/other" 2>/dev/null; (cd "$T/other" && echo x > x && git add x && git -c user.name=t -c user.email=t@t commit -qm x && git push -q origin HEAD)
 if dev B python3 "$S" init --remote "http://127.0.0.1:$PORT2/other.git" > "$T/err2.txt" 2>&1; then echo "FAIL: 無関係なリポジトリへの切り替えを許した"; exit 1; fi
 grep -q "別の内容" "$T/err2.txt" || { cat "$T/err2.txt"; exit 1; }
-git -C "$T/B/home/.ccshare/store" remote get-url origin | grep -q moved.git || { echo "FAIL: 失敗時に元の共有先に戻っていない"; exit 1; }
+git -C "$T/B/home/.ccshare/store" remote get-url origin | grep moved.git >/dev/null || { echo "FAIL: 失敗時に元の共有先に戻っていない"; exit 1; }
 echo "ALL OK"
