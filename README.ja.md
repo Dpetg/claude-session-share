@@ -100,6 +100,7 @@ OS ごとに変えたい設定 (statusLine のコマンドなど) は、共有�
 push のたびに、変わった会話の最新版がコミットされるので、共有先は少しずつ大きくなります。
 
 - `/session-share:prune --older-than 90` で、90 日以上触っていない会話を共有先から外します。各デバイスの手元には残り、その会話を続けると再び共有されます。
+- 40MB を超える会話は、共有先では行単位で `<ID>.jsonl.001`, `.002` ... に分けて置きます (GitHub は 100MB を超えるファイルを受け付けないため)。取り込むときは 1 つの会話に戻します。
 - `/session-share:prune --squash` で、共有先の git の履歴を1つのコミットにまとめて容量を減らします (強制 push)。他のデバイスは次の同期で自動的に合わせます。ブランチ保護で強制 push が禁止されていると失敗します。
 - 使用量は `/session-share:status` で確認できます。
 
@@ -118,6 +119,7 @@ python3 tests/test_paths.py   # Windows / macOS / Linux のパス変換
 bash tests/e2e.sh             # 2台のデバイスを模した push / pull / 競合 / 自動同期
 bash tests/self_hosted.sh     # 自己署名証明書の HTTPS git サーバと、共有先の引っ越し
 bash tests/features.sh        # 秘密情報の伏せ字、メモリの共有、prune と squash
+bash tests/large.sh           # 大きな会話の分割と、push を拒否されたときの立ち直り
 ```
 
 ## ライセンス

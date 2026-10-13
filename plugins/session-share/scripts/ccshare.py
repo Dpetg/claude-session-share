@@ -11,6 +11,8 @@
       projects/<key>/project.json
       projects/<key>/manifest.json         最後に push したデバイスのファイル一覧とハッシュ
       projects/<key>/sessions/<id>.jsonl   パスをプレースホルダ化した会話履歴
+      projects/<key>/sessions/<id>.jsonl.001, .002 ...
+                                           40MB を超える会話は行単位で分割して置く
       projects/<key>/sessions/<id>/        サブエージェント等の付随ファイル
 
 ローカル設定 (同期しない): ~/.ccshare/config.json, ~/.ccshare/state.json
@@ -33,6 +35,9 @@ from pathlib import Path
 PH_PROJECT = "{{CCSHARE_PROJECT}}"
 PH_HOME = "{{CCSHARE_HOME}}"
 FORK_NS = uuid.UUID("6c2b8e8e-6f0a-4d38-9a43-5b8d3c1e7a10")
+# GitHub は 50MB を超えるファイルで警告し、100MB を超えると push を拒否する
+PART_LIMIT = int(os.environ.get("CCSHARE_PART_LIMIT") or 40 * 1024 * 1024)
+HARD_LIMIT = int(os.environ.get("CCSHARE_HARD_LIMIT") or 95 * 1024 * 1024)
 
 CONFIG_ITEMS = ["settings.json", "CLAUDE.md", "keybindings.json",
                 "agents", "commands", "skills", "output-styles", "hooks"]
@@ -214,6 +219,76 @@ def sha(s):
     return hashlib.sha256(s.encode("utf-8", "surrogateescape")).hexdigest()
 
 
+# ストア内の会話ファイル。p は論理パス (<id>.jsonl)。大きいものは <id>.jsonl.001 ... に分かれている
+
+def part_files(p):
+    p = Path(p)
+    return sorted(f for f in p.parent.glob(p.name + ".*") if re.fullmatch(r"\.\d{3}", f.suffix))
+
+
+def stored_exists(p):
+    return Path(p).exists() or bool(part_files(p))
+
+
+def read_stored(p):
+    p = Path(p)
+    return read_text(p) if p.exists() else "".join(read_text(f) for f in part_files(p))
+
+
+def stored_size(p):
+    p = Path(p)
+    return sum(f.stat().st_size for f in ([p] if p.exists() else part_files(p)))
+
+
+def remove_stored(p):
+    p = Path(p)
+    for f in ([p] if p.exists() else []) + part_files(p):
+        f.unlink()
+
+
+def write_stored(p, s):
+    """PART_LIMIT を超える会話は行単位で分割する。会話は追記されていくので、
+    前の方の分割ファイルは中身が変わらず、git の履歴も増えない。"""
+    p = Path(p)
+    old = part_files(p)
+    if len(s.encode("utf-8", "surrogateescape")) <= PART_LIMIT:
+        for f in old:
+            f.unlink()
+        write_text(p, s)
+        return
+    if p.exists():
+        p.unlink()
+    chunks, cur, size = [], [], 0
+    for line in s.splitlines(True):
+        n = len(line.encode("utf-8", "surrogateescape"))
+        if cur and size + n > PART_LIMIT:
+            chunks.append("".join(cur))
+            cur, size = [], 0
+        cur.append(line)
+        size += n
+    if cur:
+        chunks.append("".join(cur))
+    keep = set()
+    for i, c in enumerate(chunks, 1):
+        f = p.with_name("{}.{:03d}".format(p.name, i))
+        keep.add(f.name)
+        write_text(f, c)
+    for f in old:
+        if f.name not in keep:
+            f.unlink()
+
+
+def stored_sessions(d):
+    """ストアの sessions/ にある会話: {id: 論理パス}"""
+    d = Path(d)
+    if not d.is_dir():
+        return {}
+    out = {f.stem: f for f in d.glob("*.jsonl")}
+    for f in d.glob("*.jsonl.001"):
+        out.setdefault(f.name[: -len(".jsonl.001")], f.with_name(f.name[:-4]))
+    return out
+
+
 # ---------------------------------------------------------------- 秘密情報
 
 SECRET_PATTERNS = [
@@ -330,13 +405,28 @@ def store_commit(cfg, message):
     st = store_path(cfg)
     if not git_store(cfg):
         return
+    # まだ送れていないコミットは 1 つにまとめ直す。push を拒否されたファイル
+    # (大きすぎる会話など) が履歴に残ったままだと、何度やり直しても送れないため
+    up = run(["git", "rev-parse", "--verify", "-q", "@{u}"], cwd=st, check=False).stdout.strip()
+    if up and run(["git", "merge-base", "--is-ancestor", up, "HEAD"], cwd=st, check=False).returncode == 0:
+        run(["git", "reset", "-q", "--soft", up], cwd=st)
+    elif not up and store_has_remote(st) and \
+            run(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=st, check=False).returncode == 0 and \
+            not run(["git", "ls-remote", "--heads", "origin"], cwd=st, check=False).stdout.strip():
+        run(["git", "update-ref", "-d", "HEAD"], cwd=st)  # 共有先が空: 最初のコミットから作り直す
     # ccshare が書くものだけをコミットする (tools/ など手で編集したものは巻き込まない)
     paths = [p for p in ("config", "projects", "ccshare.json") if (st / p).exists()]
     if paths:
         run(["git", "add", "-A", "--"] + paths, cwd=st)
-    if not paths or not run(["git", "diff", "--cached", "--name-only", "--"] + paths, cwd=st).stdout.strip():
+    staged = run(["git", "diff", "--cached", "--name-only", "-z", "--diff-filter=AM"], cwd=st).stdout.split("\0")
+    for name in filter(None, staged):
+        f = st / name
+        if f.is_file() and f.stat().st_size > HARD_LIMIT:
+            run(["git", "rm", "-q", "--cached", "--", name], cwd=st)
+            print("警告: {} は {} あり、git サーバの上限を超えるので送りません。".format(name, human(f.stat().st_size)))
+    if not run(["git", "diff", "--cached", "--name-only"], cwd=st).stdout.strip():
         return
-    run(["git", "commit", "-q", "-m", message, "--"] + paths, cwd=st)
+    run(["git", "commit", "-q", "-m", message], cwd=st)
     if store_has_remote(st):
         errors = []
         for _ in range(2):
@@ -609,18 +699,24 @@ def session_title(text):
     return (title or prompt or "").strip().replace("\n", " ")[:60]
 
 
-def copy_session_dir(src, dst, fn_obj):
-    """<id>/ 付随ディレクトリをコピー。jsonl はパス変換する。"""
+def copy_session_dir(src, dst, fn_obj, to_store=False):
+    """<id>/ 付随ディレクトリをコピー。jsonl はパス変換する (ストアへは大きければ分割して書く)。"""
     if dst.exists():
         shutil.rmtree(dst)
     if not src.is_dir():
         return
     for p in src.rglob("*"):
         if p.is_file():
+            m = re.fullmatch(r"(.*\.jsonl)\.(\d{3})", p.name)
+            if m:
+                if m.group(2) != "001":
+                    continue
+                p = p.with_name(m.group(1))
             t = dst / p.relative_to(src)
             t.parent.mkdir(parents=True, exist_ok=True)
             if p.suffix == ".jsonl":
-                write_text(t, convert_jsonl(read_text(p), fn_obj))
+                text = convert_jsonl(read_stored(p), fn_obj)
+                write_stored(t, text) if to_store else write_text(t, text)
             else:
                 shutil.copy2(p, t)
 
@@ -757,7 +853,7 @@ def push_sessions(cfg, state, key, root, report=None):
         local = convert_jsonl(read_text(f), to_store)
         L = sha(local)
         dst = st / (sid + ".jsonl")
-        S = sha(read_text(dst)) if dst.exists() else None
+        S = sha(read_stored(dst)) if stored_exists(dst) else None
         B = state["sessions"].get(state_key(key, sid))
         if sid in pruned and L == B:
             continue  # 整理 (prune) 済みで、その後この会話を続けていない
@@ -766,14 +862,16 @@ def push_sessions(cfg, state, key, root, report=None):
         if filt.found and mode == "block":
             continue
         if S == L:
+            if dst.exists() and dst.stat().st_size > PART_LIMIT:
+                write_stored(dst, local)  # 以前の版で分割せずに置いた大きな会話を分割し直す
             state["sessions"][state_key(key, sid)] = L
             continue
         if S is None or S == B:
             if sid in pruned:
                 del pruned[sid]  # 整理後に続きを書いた会話は、また共有する
                 save_json(store_path(cfg) / "projects" / safe_key(key) / "pruned.json", pruned)
-            write_text(dst, local)
-            copy_session_dir(f.with_suffix(""), st / sid, to_store)
+            write_stored(dst, local)
+            copy_session_dir(f.with_suffix(""), st / sid, to_store, to_store=True)
             state["sessions"][state_key(key, sid)] = L
             pushed += 1
         elif L == B:
@@ -932,11 +1030,10 @@ def pull_sessions(cfg, state, key, root, skip=()):
     to_store = store_converter(mapper, SecretFilter(secret_mode(cfg)))
     to_local = lambda o: mapper.walk(o, mapper.to_local)
     pulled, forks = 0, []
-    for src in sorted(st.glob("*.jsonl")):
-        sid = src.stem
+    for sid, src in sorted(stored_sessions(st).items()):
         if sid in skip:
             continue  # 今開いているセッションは書き換えない
-        stored = read_text(src)
+        stored = read_stored(src)
         S = sha(stored)
         B = state["sessions"].get(state_key(key, sid))
         local_text = convert_jsonl(stored, to_local)
@@ -1159,8 +1256,8 @@ def cmd_list(args):
         st = store_path(cfg) / "projects" / safe_key(key) / "sessions"
         print("[{}] {}".format(key, root))
         rows = []
-        for f in st.glob("*.jsonl") if st.is_dir() else []:
-            text = read_text(f)
+        for f in stored_sessions(st).values():
+            text = read_stored(f)
             last = ""
             for line in reversed(text.splitlines()):
                 m = re.search(r'"timestamp":"([^"]+)"', line)
@@ -1186,7 +1283,7 @@ def human(n):
 
 
 def session_last_time(f):
-    text = read_text(f)
+    text = read_stored(f)
     for line in reversed(text.splitlines()):
         m = re.search(r'"timestamp":"([^"]+)"', line)
         if m:
@@ -1194,6 +1291,7 @@ def session_last_time(f):
                 return datetime.datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
             except ValueError:
                 break
+    f = f if f.exists() else part_files(f)[-1]
     return datetime.datetime.fromtimestamp(f.stat().st_mtime, datetime.timezone.utc)
 
 
@@ -1208,7 +1306,7 @@ def cmd_status(args):
     print("共有先の手元コピー: {} (うち git の履歴 {})".format(human(total), human(dir_size(st / ".git"))))
     for key, root in cfg.get("projects", {}).items():
         sd = st / "projects" / safe_key(key) / "sessions"
-        n = len(list(sd.glob("*.jsonl"))) if sd.is_dir() else 0
+        n = len(stored_sessions(sd))
         print("  {} -> {} (ローカル {} 件 / 共有先 {} 件, {})".format(
             key, root, len(local_sessions(root)), n, human(dir_size(sd))))
 
@@ -1269,9 +1367,9 @@ def cmd_prune(args):
     if args.older_than is not None:
         limit = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.older_than)
         for pd in sorted((st / "projects").glob("*")) if (st / "projects").is_dir() else []:
-            for f in sorted((pd / "sessions").glob("*.jsonl")):
+            for _sid, f in sorted(stored_sessions(pd / "sessions").items()):
                 if session_last_time(f) < limit:
-                    size = f.stat().st_size + dir_size(f.with_suffix(""))
+                    size = stored_size(f) + dir_size(f.with_suffix(""))
                     targets.append((pd, f, size))
     freed = sum(t[2] for t in targets)
     print("{} 日より前の会話: {} 件 ({})".format(args.older_than, len(targets), human(freed))
@@ -1288,7 +1386,7 @@ def cmd_prune(args):
         pruned = load_json(pd / "pruned.json", {})
         pruned[f.stem] = now()
         save_json(pd / "pruned.json", pruned)
-        f.unlink()
+        remove_stored(f)
         if f.with_suffix("").is_dir():
             shutil.rmtree(f.with_suffix(""))
     store_commit(cfg, "ccshare: prune from {} at {}".format(device_id(cfg), now()))

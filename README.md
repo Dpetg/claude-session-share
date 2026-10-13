@@ -100,6 +100,7 @@ The setting is stored in the sync repository and applies to every device. Detect
 Every push commits the latest version of each changed conversation, so the repository grows over time.
 
 - `/session-share:prune --older-than 90` removes conversations not touched for 90 days from the sync repository. They stay on each device, and continuing one shares it again.
+- Conversations over 40MB are split by line into `<id>.jsonl.001`, `.002`, ... in the sync repository, because GitHub rejects files over 100MB. They are joined back into one conversation when pulled.
 - `/session-share:prune --squash` rewrites the repository's history into a single commit (force push) to reclaim space. Other devices follow automatically on their next sync. This fails if the branch is protected against force pushes.
 - `/session-share:status` shows how much space the repository uses.
 
@@ -118,6 +119,7 @@ python3 tests/test_paths.py   # path conversion for Windows / macOS / Linux
 bash tests/e2e.sh             # push / pull / conflicts / auto sync between two simulated devices
 bash tests/self_hosted.sh     # a self-hosted HTTPS git server with a self-signed certificate, and moving servers
 bash tests/features.sh        # secret masking, memory sharing, prune and squash
+bash tests/large.sh           # splitting large conversations, and recovering from a rejected push
 ```
 
 ## License
