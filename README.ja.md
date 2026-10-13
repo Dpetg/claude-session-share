@@ -33,15 +33,15 @@ Windows / macOS / Linux、デュアルブートや複数の PC の間で、Claud
 
 ## 使い方
 
-1. 共有先にする空の **private** リポジトリを作る (例: `claude-sessions`)。
-2. 1台目で `/session-share:setup https://github.com/<you>/claude-sessions` を実行し、続けて `/session-share:push`。
-3. 2台目以降も同じようにプラグインを入れて `/session-share:setup <同じURL>`。設定と会話が取り込まれる。
-4. 作業の始めに `/session-share:pull`、終わりに `/session-share:push` (プロジェクトのディレクトリで)。自動化するなら `/session-share:auto on`。
-5. 取り込んだ会話は `claude --resume` (または `/resume`) から開く。
+1. 各デバイスでプラグインを入れ、共有したいプロジェクトのディレクトリで `/session-share:setup` を実行する。
+   - [GitHub CLI (gh)](https://cli.github.com/) にログイン済みなら、private リポジトリ `<you>/claude-sessions` を作り (2台目以降は既存のものを使い)、1台目なら送信、2台目以降なら取り込み、自動同期 (起動時 pull・終了時 push) のオンまでをまとめて行います。
+   - gh を使わない場合は、空の **private** リポジトリの URL か、クラウドドライブのフォルダを渡します: `/session-share:setup https://github.com/<you>/claude-sessions`
+2. ほかのプロジェクトは、そのディレクトリで一度 `/session-share:push` すれば、以後は自動で同期されます。
+3. 取り込んだ会話は `claude --resume` (または `/resume`) から開く。
 
 | コマンド | 内容 |
 |---|---|
-| `/session-share:setup [URL\|フォルダ]` | 初期設定 |
+| `/session-share:setup [URL\|owner/repo\|フォルダ]` | 初期設定 (省略時は gh で private リポジトリを用意) |
 | `/session-share:pull` | 他のデバイスの会話と設定を取り込む |
 | `/session-share:push` | このデバイスの会話と設定を送る |
 | `/session-share:list` | 共有されている会話の一覧 |
@@ -49,6 +49,7 @@ Windows / macOS / Linux、デュアルブートや複数の PC の間で、Claud
 | `/session-share:items [add\|remove] <名前>` | 共有する設定項目の追加・削除 (例: `add rules`) |
 | `/session-share:auto [on\|off]` | 起動時 pull / 終了時 push の自動化 (デバイスごと) |
 | `/session-share:secrets [mask\|warn\|block]` | 会話に含まれる秘密情報の扱い |
+| `/session-share:slim [hooks\|images] [on\|off]` | 共有先のコピーからフックの出力・画像を削る |
 | `/session-share:prune [--older-than 日数] [--squash]` | 共有先から古い会話を外す / 履歴を作り直す |
 | `/session-share:status` | 状態の確認 |
 
@@ -99,6 +100,8 @@ OS ごとに変えたい設定 (statusLine のコマンドなど) は、共有�
 
 push のたびに、変わった会話の最新版がコミットされるので、共有先は少しずつ大きくなります。
 
+- 共有先に送るコピーでは、フックが標準出力に返した内容を 500 文字に切り詰めます (`/session-share:slim hooks off` で無効)。ツールの入力をそのまま返すフックがあると、これだけで会話の半分近くを占めることがあります。手元の会話は書き換えません。
+- `/session-share:slim images on` で、会話に貼った画像も「画像を省略」に置き換えて送ります。再開した会話では Claude がその画像を見られなくなります。
 - `/session-share:prune --older-than 90` で、90 日以上触っていない会話を共有先から外します。各デバイスの手元には残り、その会話を続けると再び共有されます。
 - 40MB を超える会話は、共有先では行単位で `<ID>.jsonl.001`, `.002` ... に分けて置きます (GitHub は 100MB を超えるファイルを受け付けないため)。取り込むときは 1 つの会話に戻します。
 - `/session-share:prune --squash` で、共有先の git の履歴を1つのコミットにまとめて容量を減らします (強制 push)。他のデバイスは次の同期で自動的に合わせます。ブランチ保護で強制 push が禁止されていると失敗します。
@@ -119,6 +122,7 @@ python3 tests/test_paths.py   # Windows / macOS / Linux のパス変換
 bash tests/e2e.sh             # 2台のデバイスを模した push / pull / 競合 / 自動同期
 bash tests/self_hosted.sh     # 自己署名証明書の HTTPS git サーバと、共有先の引っ越し
 bash tests/features.sh        # 秘密情報の伏せ字、メモリの共有、prune と squash
+bash tests/setup.sh           # 引数なしの setup (gh でリポジトリを用意)
 bash tests/large.sh           # 大きな会話の分割と、push を拒否されたときの立ち直り
 ```
 

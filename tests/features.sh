@@ -59,6 +59,28 @@ echo '{"type":"user","cwd":"'"$PA"'","sessionId":"s3","message":{"role":"user","
 test ! -e "$STORE/projects/"*/sessions/s3.jsonl || fail "block なのに送った"
 dev A python3 "$S" secrets mask >/dev/null
 
+echo "== 容量の削減 (フックの出力・画像)"
+BIG=$(python3 -c "print('z'*5000)"); IMG=$(python3 -c "print('A'*3000)")
+cat > "$DA/h1.jsonl" <<J
+{"type":"user","cwd":"$PA","sessionId":"h1","message":{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"$IMG"}}]},"toolUseResult":{"file":{"base64":"$IMG"}},"timestamp":"2026-10-03T00:00:00Z"}
+{"type":"attachment","cwd":"$PA","sessionId":"h1","attachment":{"type":"hook_success","hookName":"PostToolUse:Read","content":"keep me","stdout":"$BIG","command":"node -e $BIG"},"timestamp":"2026-10-03T00:00:01Z"}
+J
+(cd "$PA" && dev A python3 "$S" push --no-settings) >/dev/null
+H1="$(echo "$STORE"/projects/*/sessions)/h1.jsonl"
+grep "$BIG" "$H1" >/dev/null && fail "フックの出力が切り詰められていない"
+grep "文字を省略" "$H1" >/dev/null && grep "keep me" "$H1" >/dev/null || fail "切り詰めの印か content が無い"
+grep "$IMG" "$H1" >/dev/null || fail "既定では画像を残すはず"
+grep "$BIG" "$DA/h1.jsonl" >/dev/null || fail "手元の会話まで切り詰めた"
+OUT=$(cd "$PA" && dev A python3 "$S" push --no-settings); echo "$OUT" | grep "セッション 0 件" >/dev/null || fail "切り詰めのせいで毎回送り直している"
+dev A python3 "$S" slim images on | grep "画像を省く (images): オン" >/dev/null || fail "slim images on が効かない"
+(cd "$PA" && dev A python3 "$S" push --no-settings) >/dev/null
+grep "$IMG" "$H1" >/dev/null && fail "画像が省かれていない"
+grep "画像を省略" "$H1" >/dev/null || fail "画像を省いた印が無い"
+(cd "$PB" && dev B python3 "$S" pull --no-settings) >/dev/null
+grep "画像を省略" "$DB/h1.jsonl" >/dev/null || fail "B に省いた版が届かない"
+OUT=$(cd "$PB" && dev B python3 "$S" push --no-settings); echo "$OUT" | grep "セッション 0 件" >/dev/null || fail "B が取り込んだ会話を送り直している"
+dev A python3 "$S" slim images off >/dev/null
+
 echo "== 古い会話の整理"
 (cd "$PA" && dev A python3 "$S" prune --older-than 365 --dry-run) | grep "1 件" >/dev/null || fail "dry-run の対象が違う"
 ls "$STORE/projects/"*/sessions/old.jsonl >/dev/null || fail "dry-run で消した"

@@ -10,7 +10,7 @@ description: Claude Code の会話履歴と設定を Windows / macOS / Linux や
 
 | コマンド | 内容 |
 |---|---|
-| `/session-share:setup` | 初期設定 (共有先を設定) |
+| `/session-share:setup` | 初期設定 (共有先の用意から自動同期オンまで) |
 | `/session-share:pull` | 他のデバイスの会話と設定を取り込む |
 | `/session-share:push` | このデバイスの会話と設定を送る |
 | `/session-share:list` | 共有されている会話の一覧 |
@@ -18,6 +18,7 @@ description: Claude Code の会話履歴と設定を Windows / macOS / Linux や
 | `/session-share:items` | 共有する設定項目の追加・削除 (例: `add rules`) |
 | `/session-share:auto on` | 起動時 pull / 終了時 push を自動化 |
 | `/session-share:secrets` | 秘密情報の扱い (伏せ字 / 警告のみ / 送らない) |
+| `/session-share:slim` | 共有先のコピーからフックの出力・画像を削る設定 |
 | `/session-share:prune` | 共有先から古い会話を外して容量を減らす |
 | `/session-share:status` | 状態の確認 |
 

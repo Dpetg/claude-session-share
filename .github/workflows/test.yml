@@ -26,3 +26,4 @@ jobs:
       - run: bash tests/self_hosted.sh
       - run: bash tests/features.sh
       - run: bash tests/large.sh
+      - run: bash tests/setup.sh

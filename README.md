@@ -33,15 +33,15 @@ Project files themselves are expected to be shared with Git. This plugin only sh
 
 ## Usage
 
-1. Create an empty **private** repository to sync through (for example `claude-sessions`).
-2. On the first device, run `/session-share:setup https://github.com/<you>/claude-sessions`, then `/session-share:push`.
-3. On every other device, install the plugin and run `/session-share:setup <same URL>`. Your settings and conversations are pulled in.
-4. Run `/session-share:pull` when you start working and `/session-share:push` when you finish (inside the project directory), or turn on `/session-share:auto on`.
-5. Open a pulled conversation with `claude --resume` (or `/resume`).
+1. On each device, install the plugin and run `/session-share:setup` in the directory of a project you want to share.
+   - If you are logged in to the [GitHub CLI (gh)](https://cli.github.com/), this creates the private repository `<you>/claude-sessions` (or reuses it on later devices), pushes from the first device or pulls on later ones, and turns on auto sync (pull on start, push on exit), all in one step.
+   - Without gh, pass the URL of an empty **private** repository or a synced cloud-drive folder: `/session-share:setup https://github.com/<you>/claude-sessions`
+2. For other projects, run `/session-share:push` once in their directory; after that they sync automatically.
+3. Open a pulled conversation with `claude --resume` (or `/resume`).
 
 | Command | What it does |
 |---|---|
-| `/session-share:setup [URL\|folder]` | Initial setup |
+| `/session-share:setup [URL\|owner/repo\|folder]` | Initial setup (with no argument, creates a private repository with gh) |
 | `/session-share:pull` | Pull conversations and settings from other devices |
 | `/session-share:push` | Push this device's conversations and settings |
 | `/session-share:list` | List shared conversations |
@@ -49,6 +49,7 @@ Project files themselves are expected to be shared with Git. This plugin only sh
 | `/session-share:items [add\|remove] <name>` | Add or remove shared settings items (e.g. `add rules`) |
 | `/session-share:auto [on\|off]` | Pull on start / push on exit (per device) |
 | `/session-share:secrets [mask\|warn\|block]` | How to handle secrets found in conversations |
+| `/session-share:slim [hooks\|images] [on\|off]` | Trim hook output and images from the shared copy |
 | `/session-share:prune [--older-than DAYS] [--squash]` | Remove old conversations from the sync repository / squash its history |
 | `/session-share:status` | Show the current state |
 
@@ -99,6 +100,8 @@ The setting is stored in the sync repository and applies to every device. Detect
 
 Every push commits the latest version of each changed conversation, so the repository grows over time.
 
+- The shared copy keeps only the first 500 characters of what hooks print to stdout (turn off with `/session-share:slim hooks off`). A hook that echoes its tool input can make up nearly half of a conversation. Your local files are not modified.
+- `/session-share:slim images on` also replaces pasted images with an "image omitted" note. Claude can no longer see those images in a resumed conversation.
 - `/session-share:prune --older-than 90` removes conversations not touched for 90 days from the sync repository. They stay on each device, and continuing one shares it again.
 - Conversations over 40MB are split by line into `<id>.jsonl.001`, `.002`, ... in the sync repository, because GitHub rejects files over 100MB. They are joined back into one conversation when pulled.
 - `/session-share:prune --squash` rewrites the repository's history into a single commit (force push) to reclaim space. Other devices follow automatically on their next sync. This fails if the branch is protected against force pushes.
@@ -119,6 +122,7 @@ python3 tests/test_paths.py   # path conversion for Windows / macOS / Linux
 bash tests/e2e.sh             # push / pull / conflicts / auto sync between two simulated devices
 bash tests/self_hosted.sh     # a self-hosted HTTPS git server with a self-signed certificate, and moving servers
 bash tests/features.sh        # secret masking, memory sharing, prune and squash
+bash tests/setup.sh           # setup with no argument (creates the repository with gh)
 bash tests/large.sh           # splitting large conversations, and recovering from a rejected push
 ```
 

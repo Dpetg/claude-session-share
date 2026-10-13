@@ -343,9 +343,76 @@ def secret_mode(cfg):
     return store_options(cfg).get("secrets", "mask")
 
 
-def store_converter(mapper, filt):
-    """ローカル -> 共有先の変換 (パスのプレースホルダ化 + 秘密情報の処理)。"""
-    return lambda o: mapper.walk(o, lambda s: filt(mapper.to_store(s)))
+def store_converter(mapper, filt, slim=None):
+    """ローカル -> 共有先の変換 (容量の削減 + パスのプレースホルダ化 + 秘密情報の処理)。"""
+    walk = lambda o: mapper.walk(o, lambda s: filt(mapper.to_store(s)))
+    return (lambda o: walk(slim(o))) if slim else walk
+
+
+# ---------------------------------------------------------------- 容量の削減 (共有先のコピーだけ)
+
+SLIM_DEFAULTS = {"hooks": True, "images": False}
+HOOK_KEEP = 500
+CUT_MARK = "文字を省略]"
+IMAGE_NOTE = "[ccshare: 画像を省略]"
+
+
+def slim_options(cfg):
+    return dict(SLIM_DEFAULTS, **store_options(cfg).get("slim", {}))
+
+
+def cut(v, keep):
+    if isinstance(v, str) and len(v) > keep and not v.endswith(CUT_MARK):
+        return v[:keep] + "\n…[ccshare: {} {}".format(len(v) - keep, CUT_MARK)
+    return v
+
+
+def drop_image_data(o):
+    """表示用の toolUseResult に入っている画像データ (会話本文の画像と重複している) を空にする。"""
+    if isinstance(o, list):
+        return [drop_image_data(x) for x in o]
+    if isinstance(o, dict):
+        out = {}
+        for k, v in o.items():
+            if k in ("base64", "data") and isinstance(v, str) and len(v) > 1000:
+                v = ""
+            out[k] = drop_image_data(v)
+        return out
+    return o
+
+
+def drop_images(o):
+    """会話本文の画像ブロックを、省略したことを示すテキストに置き換える。"""
+    if isinstance(o, list):
+        return [drop_images(x) for x in o]
+    if isinstance(o, dict):
+        if o.get("type") == "image" and isinstance(o.get("source"), dict) and o["source"].get("type") == "base64":
+            return {"type": "text", "text": IMAGE_NOTE}
+        return {k: drop_images(v) for k, v in o.items()}
+    return o
+
+
+def slimmer(cfg):
+    """会話の 1 行 (dict) を共有用に小さくする関数。--resume に要らないものだけを削る。"""
+    opts = slim_options(cfg)
+
+    def slim(o):
+        if not isinstance(o, dict):
+            return o
+        if opts["hooks"]:
+            a = o.get("attachment")
+            # フックが標準出力に返したもの (入力をそのまま返すフックだと会話の半分以上を占める)。
+            # モデルに渡る additionalContext は content 側にあるので残す
+            if o.get("type") == "attachment" and isinstance(a, dict) and \
+                    str(a.get("type", "")).startswith(("hook", "async_hook")):
+                o = dict(o, attachment=dict(a, **{k: cut(a[k], HOOK_KEEP) for k in ("stdout", "stderr", "command") if k in a}))
+        if opts["images"]:
+            if "toolUseResult" in o:
+                o = dict(o, toolUseResult=drop_image_data(o["toolUseResult"]))
+            if isinstance(o.get("message"), dict):
+                o = dict(o, message=drop_images(o["message"]))
+        return o
+    return slim
 
 
 # ---------------------------------------------------------------- ストア / バックエンド
@@ -845,11 +912,12 @@ def push_sessions(cfg, state, key, root, report=None):
     sessions = local_sessions(root)
     mapper = PathMapper(root, aliases=root_aliases(root, [c for _f, c in sessions.values()]))
     mode = secret_mode(cfg)
+    slim = slimmer(cfg)
     pruned = pruned_ids(cfg, key)
     pushed, conflicts = 0, []
     for sid, (f, _cwd) in sorted(sessions.items()):
         filt = SecretFilter(mode)
-        to_store = store_converter(mapper, filt)
+        to_store = store_converter(mapper, filt, slim)
         local = convert_jsonl(read_text(f), to_store)
         L = sha(local)
         dst = st / (sid + ".jsonl")
@@ -1027,7 +1095,7 @@ def pull_sessions(cfg, state, key, root, skip=()):
         return 0, []
     have = local_sessions(root)
     mapper = PathMapper(root, aliases=root_aliases(root, [c for _f, c in have.values()]))
-    to_store = store_converter(mapper, SecretFilter(secret_mode(cfg)))
+    to_store = store_converter(mapper, SecretFilter(secret_mode(cfg)), slimmer(cfg))
     to_local = lambda o: mapper.walk(o, mapper.to_local)
     pulled, forks = 0, []
     for sid, src in sorted(stored_sessions(st).items()):
@@ -1199,6 +1267,77 @@ def cmd_init(args):
     print("初期化しました: ストア={} ({}) デバイス={}".format(st, args.backend, cfg["device"]))
 
 
+GH_DEFAULT_REPO = "claude-sessions"
+
+
+def gh(*a, check=True):
+    return run([os.environ.get("CCSHARE_GH") or "gh"] + list(a), check=check)
+
+
+def gh_repo(name):
+    """GitHub CLI (gh) で private リポジトリを用意し、git の URL を返す (無ければ作る)。"""
+    exe = os.environ.get("CCSHARE_GH") or shutil.which("gh")
+    if not exe:
+        sys.exit("ccshare: 共有先を自動で用意するには GitHub CLI (gh) が要ります。\n"
+                 "  gh をインストールして `gh auth login` するか、共有先の URL / フォルダを指定してください\n"
+                 "  (例: setup https://github.com/<user>/claude-sessions)。")
+    if gh("auth", "status", check=False).returncode != 0:
+        sys.exit("ccshare: gh が GitHub にログインしていません。`gh auth login` を実行してから、もう一度 setup してください。")
+    full = name if "/" in name else gh("api", "user", "--jq", ".login").stdout.strip() + "/" + name
+    r = gh("repo", "view", full, "--json", "visibility", "--jq", ".visibility", check=False)
+    if r.returncode == 0:
+        if r.stdout.strip().upper() != "PRIVATE":
+            sys.exit("ccshare: {} は private ではありません。会話にはコードや秘密情報が含まれ得るので、"
+                     "private に変更するか、別の名前を指定してください。".format(full))
+        print("既存の private リポジトリ {} を使います。".format(full))
+    else:
+        gh("repo", "create", full, "--private", "--description", "Claude Code conversations and settings (session-share)")
+        print("private リポジトリ {} を作りました。".format(full))
+    url = "https://github.com/{}.git".format(full)
+    if run(["git", "ls-remote", "--heads", url], check=False).returncode != 0:
+        # git が gh のログイン情報を使えるようにする (git の credential helper に gh を登録)
+        gh("auth", "setup-git", check=False)
+        print("git の認証に gh のログイン情報を使うよう設定しました (gh auth setup-git)。")
+    return url
+
+
+def looks_like_remote(t):
+    return bool(re.match(r"^[A-Za-z][\w+.-]*://", t) or re.match(r"^[^/\\\s]+@[^/\\\s]+:", t))
+
+
+def cmd_setup(args):
+    """初期設定をまとめて行う: 共有先の用意 -> init -> 1台目なら push / 2台目以降なら pull -> 自動同期オン。"""
+    cfg = load_json(ccshare_dir() / "config.json", {}) or {}
+    t = args.target
+    if not t and cfg.get("store"):
+        print("このデバイスは設定済みです (共有先: {})。共有先を変えるときは URL を指定してください。".format(
+            run(["git", "config", "--get", "remote.origin.url"], cwd=cfg["store"], check=False).stdout.strip()
+            or cfg["store"]))
+    else:
+        init = argparse.Namespace(store=None, backend="git", remote=None, device=args.device,
+                                  ssh_key=args.ssh_key, ca_cert=args.ca_cert)
+        if not t:
+            init.remote = gh_repo(args.name or GH_DEFAULT_REPO)
+        elif looks_like_remote(t):
+            init.remote = t
+        elif not Path(t).expanduser().exists() and re.fullmatch(r"[\w.-]+/[\w.-]+", t):
+            init.remote = gh_repo(t)  # owner/repo
+        else:
+            init.backend, init.store = "folder", t
+        cmd_init(init)
+        cfg = load_config()
+        store_fetch(cfg)
+        sync = argparse.Namespace(project=None, all=False, no_settings=False, quiet_hook=False)
+        if store_config_empty(cfg):
+            print("共有先は空なので、このデバイスの設定と会話を送ります (1台目)。")
+            cmd_push(argparse.Namespace(cmd="push", **vars(sync)))
+        else:
+            print("共有先にデータがあるので、取り込みます (2台目以降)。")
+            cmd_pull(argparse.Namespace(cmd="pull", **vars(sync)))
+    if not args.no_auto:
+        cmd_auto(argparse.Namespace(state="on"))
+
+
 def cmd_link(args):
     cfg = load_config()
     store_fetch(cfg)
@@ -1356,6 +1495,24 @@ def cmd_secrets(args):
     print("検出する種類: " + ", ".join(k for k, _ in SECRET_PATTERNS) + ", パスワード等の代入")
 
 
+def cmd_slim(args):
+    """共有先に送るコピーで削るもの。共有先に保存されるので全デバイスで共通。手元の会話は書き換えない。"""
+    cfg = load_config()
+    store_fetch(cfg)
+    if args.what:
+        if args.state is None:
+            sys.exit("ccshare: on か off を指定してください (例: slim images on)")
+        opts = store_options(cfg)
+        opts["slim"] = dict(opts.get("slim", {}), **{args.what: args.state == "on"})
+        save_json(store_path(cfg) / "ccshare.json", opts)
+        store_commit(cfg, "ccshare: slim {} {} from {}".format(args.what, args.state, device_id(cfg)))
+    o = slim_options(cfg)
+    onoff = lambda b: "オン" if b else "オフ"
+    print("フックの出力を {} 文字に切り詰める (hooks): {}".format(HOOK_KEEP, onoff(o["hooks"])))
+    print("画像を省く (images): {}".format(onoff(o["images"])))
+    print("次の push から、変更した会話も含めて送り直します。")
+
+
 def cmd_prune(args):
     """共有先から古い会話を外す (各デバイスの手元の会話は消さない)。--squash で git の履歴も作り直して容量を減らす。"""
     cfg = load_config()
@@ -1458,6 +1615,14 @@ def cmd_hook(args):
 def main():
     ap = argparse.ArgumentParser(prog="ccshare", description="Claude Code セッション共有")
     sp = ap.add_subparsers(dest="cmd", required=True)
+    a = sp.add_parser("setup", help="初期設定をまとめて行う (共有先の用意・取り込みまたは送信・自動同期)")
+    a.add_argument("target", nargs="?", help="git リモート URL / owner/repo / フォルダ (省略時は gh で private リポジトリを用意)")
+    a.add_argument("--name", help="gh で用意するリポジトリ名 (既定: claude-sessions)")
+    a.add_argument("--device", help="デバイス名 (既定: ホスト名-OS)")
+    a.add_argument("--ssh-key", help="共有先への SSH 接続に使う秘密鍵 (このデバイスだけの設定)")
+    a.add_argument("--ca-cert", help="自己署名の HTTPS サーバ用の CA 証明書 (このデバイスだけの設定)")
+    a.add_argument("--no-auto", action="store_true", help="自動同期をオンにしない")
+    a.set_defaults(fn=cmd_setup)
     a = sp.add_parser("init", help="ストアを設定")
     a.add_argument("--store", help="共有先の手元コピーの場所 (既定: ~/.ccshare/store)")
     a.add_argument("--backend", choices=["git", "folder"], default="git")
@@ -1488,6 +1653,10 @@ def main():
     a = sp.add_parser("secrets", help="秘密情報の扱い (mask / warn / block)")
     a.add_argument("mode", nargs="?", choices=["mask", "warn", "block"])
     a.set_defaults(fn=cmd_secrets)
+    a = sp.add_parser("slim", help="共有先に送るコピーで削るもの (フックの出力・画像)")
+    a.add_argument("what", nargs="?", choices=["hooks", "images"])
+    a.add_argument("state", nargs="?", choices=["on", "off"])
+    a.set_defaults(fn=cmd_slim)
     a = sp.add_parser("prune", help="共有先から古い会話を外す / 履歴を作り直して容量を減らす")
     a.add_argument("--older-than", type=int, metavar="日数")
     a.add_argument("--squash", action="store_true", help="git の履歴を1つにまとめて容量を減らす")
