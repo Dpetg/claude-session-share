@@ -2,7 +2,7 @@
 # 2台のデバイス (ホーム・プロジェクトのパスが異なる) を模した通しテスト
 set -euo pipefail
 S="$(cd "$(dirname "$0")/../plugins/session-share/scripts" && pwd)/ccshare.py"
-T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+T="$(cd "$(mktemp -d)" && pwd -P)"; trap 'rm -rf "$T"' EXIT
 git init -q --bare "$T/remote.git"
 git init -q "$T/origin" && (cd "$T/origin" && echo hello > a.txt && echo 'SECRET=1' > .env && git add a.txt && git -c user.name=t -c user.email=t@t commit -qm init && git remote add origin https://github.com/Dpetg/demo.git)
 dev() { # dev <name> <cmd...>

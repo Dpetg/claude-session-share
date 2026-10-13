@@ -26,4 +26,8 @@ assert lin.to_store("/home/shota/work/demo-old/x") == "{{CCSHARE_HOME}}/work/dem
 obj = win.walk({"cwd": "{{CCSHARE_PROJECT}}/sub"}, win.to_local)
 assert obj["cwd"] == r"C:\Users\shota\src\demo\sub", obj
 assert encode_project_dir(r"C:\Users\shota\src\demo") == "C--Users-shota-src-demo"
+# macOS の /var -> /private/var のように、同じプロジェクトを別の表記で記録した会話も置き換える
+mac2 = PathMapper("/private/var/u/demo", "/Users/u", windows=False, aliases=["/var/u/demo"])
+assert mac2.to_store("/var/u/demo/a.py") == "{{CCSHARE_PROJECT}}/a.py"
+assert mac2.to_store("/private/var/u/demo/a.py") == "{{CCSHARE_PROJECT}}/a.py"
 print("OK")

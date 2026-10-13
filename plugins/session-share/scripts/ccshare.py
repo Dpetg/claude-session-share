@@ -136,17 +136,20 @@ def run(cmd, cwd=None, check=True):
 class PathMapper:
     """デバイス固有の絶対パスとプレースホルダを相互変換する。"""
 
-    def __init__(self, project_root=None, home=None, windows=None):
+    def __init__(self, project_root=None, home=None, windows=None, aliases=()):
         self.windows = is_windows() if windows is None else windows
         self.project = str(project_root) if project_root else None
         self.home = str(home or home_dir())
-        pairs = []
+        groups = []
         if self.project:
-            pairs.append((self.project, PH_PROJECT))
-        pairs.append((self.home, PH_HOME))
+            # aliases: シンボリックリンク経由など、同じプロジェクトを指す別の表記 (macOS の /var と /private/var 等)
+            groups.append(([self.project] + [str(a) for a in aliases], PH_PROJECT))
+        groups.append(([self.home, os.path.realpath(self.home)], PH_HOME))
         self.out_patterns = []
-        for real, ph in pairs:
-            variants = {real, real.replace("\\", "/"), real.replace("/", "\\")}
+        for reals, ph in groups:
+            variants = set()
+            for real in reals:
+                variants |= {real, real.replace("\\", "/"), real.replace("/", "\\")}
             alts = "|".join(re.escape(v) for v in sorted(variants, key=len, reverse=True))
             flags = re.IGNORECASE if self.windows else 0
             # 直後がパス区切りか、パスに使われない文字であるときだけ置換 (/proj が /project2 に当たらないように)
@@ -456,11 +459,27 @@ def local_sessions(root):
             continue
         for f in d.glob("*.jsonl"):
             cwd = first_cwd(f)
-            if cwd and under(cwd, root):
+            if cwd and (under(cwd, root) or under(os.path.realpath(cwd), root)):
                 prev = out.get(f.stem)
                 if not prev or f.stat().st_mtime > prev[0].stat().st_mtime:
                     out[f.stem] = (f, cwd)
     return out
+
+
+def root_aliases(root, cwds):
+    """セッションに記録された cwd のうち、root と表記が違うもの (リンク経由) から root の別表記を求める。"""
+    out = set()
+    for c in cwds:
+        if under(c, root):
+            continue
+        real = os.path.realpath(c)
+        if not under(real, root):
+            continue
+        rel = os.path.relpath(real, root)
+        alias = c if rel == "." else c[: len(c) - len(rel) - 1]
+        if alias:
+            out.add(alias)
+    return sorted(out, key=len, reverse=True)
 
 
 def session_title(text):
@@ -501,10 +520,11 @@ def state_key(key, sid):
 
 def push_sessions(cfg, state, key, root):
     st = store_path(cfg) / "projects" / safe_key(key) / "sessions"
-    mapper = PathMapper(root)
+    sessions = local_sessions(root)
+    mapper = PathMapper(root, aliases=root_aliases(root, [c for _f, c in sessions.values()]))
     to_store = lambda o: mapper.walk(o, mapper.to_store)
     pushed, conflicts = 0, []
-    for sid, (f, _cwd) in sorted(local_sessions(root).items()):
+    for sid, (f, _cwd) in sorted(sessions.items()):
         local = convert_jsonl(read_text(f), to_store)
         L = sha(local)
         dst = st / (sid + ".jsonl")
@@ -652,10 +672,10 @@ def pull_sessions(cfg, state, key, root, skip=()):
     st = store_path(cfg) / "projects" / safe_key(key) / "sessions"
     if not st.is_dir():
         return 0, []
-    mapper = PathMapper(root)
+    have = local_sessions(root)
+    mapper = PathMapper(root, aliases=root_aliases(root, [c for _f, c in have.values()]))
     to_store = lambda o: mapper.walk(o, mapper.to_store)
     to_local = lambda o: mapper.walk(o, mapper.to_local)
-    have = local_sessions(root)
     pulled, forks = 0, []
     for src in sorted(st.glob("*.jsonl")):
         sid = src.stem
