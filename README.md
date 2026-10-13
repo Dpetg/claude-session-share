@@ -1,80 +1,80 @@
-# session-share — Claude Code の会話をデバイス・OS をまたいで続ける
+# session-share — continue Claude Code sessions across devices and OSes
 
-Windows / macOS / Linux、デュアルブートや複数の PC の間で、Claude Code の**会話履歴と設定**を共有し、別のデバイスで `claude --resume` して続きから作業できるようにする Claude Code プラグインです。
+English | [日本語](README.ja.md)
 
-*English: A Claude Code plugin that syncs conversation history and settings across devices and operating systems through a private git repository (or a cloud-drive folder), so you can `claude --resume` a session started on another machine.*
+A Claude Code plugin that shares your **conversation history and settings** between Windows, macOS and Linux, across dual-boot setups and multiple machines, so you can `claude --resume` on one device a session you started on another.
 
-## できること
+## Features
 
-- `/session-share:push` / `/session-share:pull` で会話と設定を送受信
-- プロジェクトの場所が OS ごとに違っても再開できる (会話の中のパスを自動で置き換え)
-- 同じ会話を2台で進めてしまっても、どちらも消さずに別の会話として残す
-- プロジェクトのファイルが他のデバイスと一致しているかを確認 (`.env` や `node_modules/` などの環境固有ファイルと改行コードの差は無視)
-- `/session-share:auto on` で、起動時に pull・終了時に push を自動化
+- Send and receive conversations and settings with `/session-share:push` and `/session-share:pull`
+- Resume even when the project lives at a different path on each OS (paths inside conversations are rewritten automatically)
+- If the same conversation was continued on two devices, both versions are kept, the other one as a separate session
+- Check that your project files match the other device (environment-specific files such as `.env` and `node_modules/`, and line-ending differences, are ignored)
+- `/session-share:auto on` pulls when Claude Code starts and pushes when it exits
 
-プロジェクトのファイル自体は Git で共有する前提です。このプラグインが共有するのは Claude Code 側のデータだけです。
+Project files themselves are expected to be shared with Git. This plugin only shares Claude Code's own data.
 
-## 必要なもの
+## Requirements
 
 - Claude Code
-- Python 3.8 以上 (標準ライブラリのみ使用。Windows は `py` でも可)
-- git と、共有先にする **private** の git リポジトリ (GitHub など)。または OneDrive / Dropbox / Google Drive などの同期フォルダ
-- Windows では Git for Windows (Git Bash)
+- Python 3.8+ (standard library only; `py` works on Windows)
+- git and a **private** git repository to sync through (GitHub etc.), or a synced folder such as OneDrive, Dropbox or Google Drive
+- On Windows, Git for Windows (Git Bash)
 
-## インストール
+## Install
 
 ```
 /plugin marketplace add Dpetg/claude-session-share
 /plugin install session-share@claude-session-share
 ```
 
-## 使い方
+## Usage
 
-1. 共有先にする空の **private** リポジトリを作る (例: `claude-sessions`)。
-2. 1台目で `/session-share:setup https://github.com/<you>/claude-sessions` を実行し、続けて `/session-share:push`。
-3. 2台目以降も同じようにプラグインを入れて `/session-share:setup <同じURL>`。設定と会話が取り込まれる。
-4. 作業の始めに `/session-share:pull`、終わりに `/session-share:push` (プロジェクトのディレクトリで)。自動化するなら `/session-share:auto on`。
-5. 取り込んだ会話は `claude --resume` (または `/resume`) から開く。
+1. Create an empty **private** repository to sync through (for example `claude-sessions`).
+2. On the first device, run `/session-share:setup https://github.com/<you>/claude-sessions`, then `/session-share:push`.
+3. On every other device, install the plugin and run `/session-share:setup <same URL>`. Your settings and conversations are pulled in.
+4. Run `/session-share:pull` when you start working and `/session-share:push` when you finish (inside the project directory), or turn on `/session-share:auto on`.
+5. Open a pulled conversation with `claude --resume` (or `/resume`).
 
-| コマンド | 内容 |
+| Command | What it does |
 |---|---|
-| `/session-share:setup [URL\|フォルダ]` | 初期設定 |
-| `/session-share:pull` | 他のデバイスの会話と設定を取り込む |
-| `/session-share:push` | このデバイスの会話と設定を送る |
-| `/session-share:list` | 共有されている会話の一覧 |
-| `/session-share:verify` | ファイルが最後に push したデバイスと一致しているか |
-| `/session-share:items [add\|remove] <名前>` | 共有する設定項目の追加・削除 (例: `add rules`) |
-| `/session-share:auto [on\|off]` | 起動時 pull / 終了時 push の自動化 (デバイスごと) |
-| `/session-share:status` | 状態の確認 |
+| `/session-share:setup [URL\|folder]` | Initial setup |
+| `/session-share:pull` | Pull conversations and settings from other devices |
+| `/session-share:push` | Push this device's conversations and settings |
+| `/session-share:list` | List shared conversations |
+| `/session-share:verify` | Check that project files match the device that pushed last |
+| `/session-share:items [add\|remove] <name>` | Add or remove shared settings items (e.g. `add rules`) |
+| `/session-share:auto [on\|off]` | Pull on start / push on exit (per device) |
+| `/session-share:status` | Show the current state |
 
-## 共有されるもの・されないもの
+## What is shared
 
-| 共有する | 共有しない |
+| Shared | Not shared |
 |---|---|
-| 会話履歴 (`~/.claude/projects/` のうち、リンクしたプロジェクトのもの) | 認証情報 (`.credentials.json`) |
-| `settings.json`, `CLAUDE.md`, `keybindings.json` | `~/.claude.json` (アカウント情報など) |
+| Conversation history (from `~/.claude/projects/`, for linked projects only) | Credentials (`.credentials.json`) |
+| `settings.json`, `CLAUDE.md`, `keybindings.json` | `~/.claude.json` (account info etc.) |
 | `agents/`, `commands/`, `skills/`, `output-styles/`, `hooks/` | `settings.local.json` |
-| `rules/` など (`items add` で追加したもの) | シェルのスナップショットや一時ファイル |
+| Extra items you add with `items add`, such as `rules/` | Shell snapshots and other temporary files |
 
-OS ごとに変えたい設定 (statusLine のコマンドなど) は、共有先リポジトリの `config/settings.windows.json` / `settings.mac.json` / `settings.linux.json` に書くと、その OS でだけ上書きされます。
+For settings that must differ per OS (such as a statusLine command), put them in `config/settings.windows.json`, `settings.mac.json` or `settings.linux.json` in your sync repository. They override the shared settings on that OS only.
 
-> **注意**: 会話履歴にはコードや秘密情報が含まれることがあります。共有先は必ず private にしてください。
+> **Warning**: conversations can contain code and secrets. Always keep the sync repository private.
 
-## 仕組み
+## How it works
 
-Claude Code は会話を `~/.claude/projects/<作業ディレクトリのパスを変換した名前>/<セッションID>.jsonl` に保存し、`--resume` は今のディレクトリに対応するフォルダから会話を探します。そのため、パスの違う別のデバイスに単純にコピーしても会話は見つかりません。
+Claude Code stores each conversation in `~/.claude/projects/<encoded working directory>/<session id>.jsonl`, and `--resume` looks in the folder that matches the current directory. Copying the files to a device where the project lives at a different path therefore does not work.
 
-session-share は、送るときに会話の中の絶対パス (プロジェクトのルートとホーム) を `{{CCSHARE_PROJECT}}` / `{{CCSHARE_HOME}}` に置き換え、受け取るときにそのデバイスのパスに戻して正しいフォルダに置きます。プロジェクトはデバイス間で git の `origin` URL によって対応付けます (リモートが無い場合は `link --key` で名前を付ける)。
+When pushing, session-share replaces absolute paths inside conversations (the project root and your home directory) with `{{CCSHARE_PROJECT}}` and `{{CCSHARE_HOME}}`. When pulling, it puts that device's paths back and writes the conversation into the right folder. Projects are matched across devices by their git `origin` URL; for projects without a remote, give them a shared name with `link --key`.
 
-同期の状態はセッションごとに「最後に同期した版」のハッシュで管理します。片方だけが進んでいれば上書きし、両方で進んでいれば相手側の版を別 ID の会話として取り込みます。
+Sync state is tracked per session as a hash of the last synced version. If only one side changed, it is overwritten; if both changed, the other side's version is pulled in as a separate session.
 
-## テスト
+## Tests
 
 ```
-python3 tests/test_paths.py   # Windows / macOS / Linux のパス変換
-bash tests/e2e.sh             # 2台のデバイスを模した push / pull / 競合 / 自動同期
+python3 tests/test_paths.py   # path conversion for Windows / macOS / Linux
+bash tests/e2e.sh             # push / pull / conflicts / auto sync between two simulated devices
 ```
 
-## ライセンス
+## License
 
 MIT
