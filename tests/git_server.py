@@ -15,8 +15,19 @@ BACKEND = subprocess.run(["git", "--exec-path"], capture_output=True, text=True)
 
 
 def app(environ, start_response):
-    length = int(environ.get("CONTENT_LENGTH") or 0)
-    body = environ["wsgi.input"].read(length) if length else b""
+    inp = environ["wsgi.input"]
+    if environ.get("HTTP_TRANSFER_ENCODING", "").lower() == "chunked":
+        body = b""  # 大きな push は長さ指定なしの chunked で送られてくる
+        while True:
+            size = int(inp.readline().split(b";")[0].strip() or b"0", 16)
+            if size == 0:
+                inp.readline()
+                break
+            body += inp.read(size)
+            inp.readline()
+    else:
+        length = int(environ.get("CONTENT_LENGTH") or 0)
+        body = inp.read(length) if length else b""
     env = {
         "GIT_PROJECT_ROOT": ROOT,
         "GIT_HTTP_EXPORT_ALL": "1",

@@ -20,6 +20,7 @@ python3 "$HERE/git_server.py" "$T/srv" "$PORT" "$T/cert.pem" "$T/key.pem" & PIDS
 python3 "$HERE/git_server.py" "$T/srv" "$PORT2" & PIDS+=($!)
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break; sleep 0.1; done
 URL="https://127.0.0.1:$PORT/claude-sessions.git"
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.postBuffer GIT_CONFIG_VALUE_0=104857600  # テスト用サーバ向け
 dev() { local n=$1; shift
   CCSHARE_HOME_OVERRIDE="$T/$n/home" CLAUDE_CONFIG_DIR="$T/$n/home/.claude" CCSHARE_DIR="$T/$n/home/.ccshare" \
   GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t "$@"; }
@@ -42,7 +43,9 @@ grep -q dark "$T/B/home/.claude/settings.json" || { echo "FAIL: B に設定が�
 echo "== 共有先の引っ越し (空のリポジトリへ)"
 URL2="http://127.0.0.1:$PORT2/moved.git"
 dev A python3 "$S" init --remote "$URL2"
-git --git-dir="$T/srv/moved.git" log --oneline | grep -q "push from devA" || { echo "FAIL: 引っ越し先に履歴が無い"; exit 1; }
+git --git-dir="$T/srv/moved.git" log --oneline | grep "push from devA" >/dev/null || {
+  git --git-dir="$T/srv/moved.git" log --oneline --all; git -C "$T/A/home/.ccshare/store" log --oneline -3; git -C "$T/A/home/.ccshare/store" remote -v
+  echo "FAIL: 引っ越し先に履歴が無い"; exit 1; }
 dev B python3 "$S" init --remote "$URL2"   # 2台目も同じ共有先へ切り替えられる
 (cd "$T/B/home" && dev B python3 "$S" pull) >/dev/null
 git -C "$T/B/home/.ccshare/store" log --oneline | grep -q "push from devA" || {
