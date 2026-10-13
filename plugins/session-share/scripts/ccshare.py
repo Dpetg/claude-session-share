@@ -762,6 +762,16 @@ def save_state(s):
 
 # ---------------------------------------------------------------- コマンド
 
+def remote_default_branch(st):
+    """共有先の既定ブランチ名 (分からなければ手元のブランチ名)。"""
+    out = run(["git", "ls-remote", "--symref", "origin", "HEAD"], cwd=st, check=False).stdout
+    m = re.search(r"^ref: refs/heads/(\S+)\s+HEAD", out, re.M)
+    if m and run(["git", "rev-parse", "--verify", "-q", "refs/remotes/origin/" + m.group(1)],
+                  cwd=st, check=False).returncode == 0:
+        return m.group(1)
+    return run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=st).stdout.strip()
+
+
 REMOTE_HINTS = """接続できない場合の確認点:
   - SSH (git@host:path, ssh://host:port/path): `ssh -T git@<host>` が通るか。鍵を指定するなら init に --ssh-key <鍵のパス>
   - HTTPS: `git ls-remote <URL>` が通るか。認証は git の credential helper で設定する
@@ -826,15 +836,15 @@ def cmd_init(args):
                 store_git_config(st, args)
                 if not remote_empty:
                     # 他のデバイスが引っ越し済みの共有先なら、同じ履歴の続きなので受け入れる
-                    run(["git", "fetch", "-q", "origin"], cwd=st, check=False)
-                    same = run(["git", "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"], cwd=st, check=False)
+                    run(["git", "fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"], cwd=st, check=False)
+                    target = "origin/" + remote_default_branch(st)
+                    same = run(["git", "merge-base", "--is-ancestor", "HEAD", target], cwd=st, check=False)
                     if same.returncode != 0:
                         run(["git", "remote", "set-url", "origin", cur], cwd=st)
                         sys.exit("ccshare: 新しい共有先 {} には別の内容が入っています。空のリポジトリか、"
                                  "他のデバイスが引っ越しに使ったリポジトリを指定してください。".format(args.remote))
-                    run(["git", "pull", "-q", "--rebase", "--autostash", "origin", "HEAD"], cwd=st, check=False)
-                    run(["git", "branch", "-q", "--set-upstream-to=origin/" + run(
-                        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=st).stdout.strip()], cwd=st, check=False)
+                    run(["git", "merge", "-q", "--ff-only", target], cwd=st)
+                    run(["git", "branch", "-q", "--set-upstream-to=" + target], cwd=st, check=False)
                 print("共有先を変更しました: {} -> {}".format(cur, args.remote))
             elif not cur:
                 run(["git", "remote", "add", "origin", args.remote], cwd=st)
