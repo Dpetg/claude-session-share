@@ -338,11 +338,21 @@ def store_commit(cfg, message):
         return
     run(["git", "commit", "-q", "-m", message, "--"] + paths, cwd=st)
     if store_has_remote(st):
+        errors = []
         for _ in range(2):
-            if run(["git", "push", "-q", "-u", "origin", "HEAD"], cwd=st, check=False).returncode == 0:
+            r = run(["git", "push", "-q", "-u", "origin", "HEAD"], cwd=st, check=False)
+            if r.returncode == 0:
                 return
-            run(["git", "pull", "--rebase", "--autostash"], cwd=st, check=False)
-        print("警告: ストアの git push に失敗しました。ネットワークと認証を確認してください。")
+            errors.append(r.stderr.strip())
+            r = run(["git", "pull", "--rebase", "--autostash"], cwd=st, check=False)
+            if r.returncode != 0:
+                errors.append(r.stderr.strip())
+                if (st / ".git" / "rebase-merge").exists() or (st / ".git" / "rebase-apply").exists():
+                    # 途中で止まった rebase を残すと、次の pull / push もすべて失敗する
+                    run(["git", "rebase", "--abort"], cwd=st, check=False)
+                break
+        print("警告: ストアの git push に失敗しました ({})。手元のストアには記録済みです。\n"
+              "git の出力:\n{}".format(st, "\n".join(e for e in errors if e) or "(なし)"))
 
 
 def device_id(cfg):
