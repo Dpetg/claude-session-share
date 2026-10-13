@@ -1,0 +1,16 @@
+{
+  "name": "claude-session-share",
+  "owner": {
+    "name": "Dpetg"
+  },
+  "metadata": {
+    "description": "Claude Code の会話履歴と設定をデバイス・OS 間で共有するプラグイン"
+  },
+  "plugins": [
+    {
+      "name": "session-share",
+      "source": "./plugins/session-share",
+      "description": "Claude Code の会話履歴と設定をデバイス・OS 間で共有して再開する"
+    }
+  ]
+}

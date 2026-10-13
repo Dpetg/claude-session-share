@@ -1,0 +1,10 @@
+{
+  "name": "session-share",
+  "version": "0.1.0",
+  "description": "Claude Code の会話履歴と設定を Windows / macOS / Linux・複数デバイス間で共有し、続きから再開できるようにする",
+  "author": {"name": "Dpetg"},
+  "homepage": "https://github.com/Dpetg/claude-session-share",
+  "repository": "https://github.com/Dpetg/claude-session-share",
+  "license": "MIT",
+  "keywords": ["session", "sync", "resume", "cross-platform", "git"]
+}

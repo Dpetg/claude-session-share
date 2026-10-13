@@ -1,0 +1,16 @@
+{
+  "description": "自動同期 (/session-share:auto on のときだけ動作): 起動時に pull、終了時に push",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [{"type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/run.sh\" hook start", "timeout": 60}]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [{"type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/run.sh\" hook end", "timeout": 60}]
+      }
+    ]
+  }
+}
