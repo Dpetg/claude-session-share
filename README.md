@@ -18,7 +18,7 @@ Project files themselves are expected to be shared with Git. This plugin only sh
 
 - Claude Code
 - Python 3.8+ (standard library only; `py` works on Windows)
-- git and a **private** git repository to sync through (GitHub etc.), or a synced folder such as OneDrive, Dropbox or Google Drive
+- git and a **private** git repository to sync through (GitHub, GitLab, or your own git server), or a synced folder such as OneDrive, Dropbox or Google Drive
 - On Windows, Git for Windows (Git Bash)
 
 ## Install
@@ -47,6 +47,25 @@ Project files themselves are expected to be shared with Git. This plugin only sh
 | `/session-share:auto [on\|off]` | Pull on start / push on exit (per device) |
 | `/session-share:status` | Show the current state |
 
+## Using your own git server
+
+Any git remote that `git` itself can reach works: Gitea, GitLab, a bare repository on a server you can SSH into, or a NAS.
+
+```
+# On the server (for a plain SSH server)
+git init --bare /srv/git/claude-sessions.git
+
+# In Claude Code, on each device
+/session-share:setup me@myserver:/srv/git/claude-sessions.git
+/session-share:setup ssh://git@git.example.com:2222/me/claude-sessions.git
+/session-share:setup https://git.example.com/me/claude-sessions.git
+```
+
+- Setup checks the connection first and stops with the reason and what to check if it fails.
+- To use a dedicated SSH key, or a CA certificate for a self-signed HTTPS server, run the script's `init` with `--ssh-key <private key>` or `--ca-cert <CA cert>`. These are stored only on that device. (`/session-share:setup` passes them for you if you mention them.)
+- To move to another server, run setup again with the new URL. If the new repository is empty, everything is copied there; other devices then switch with the same command and continue from it.
+- Projects are matched across devices by their git `origin` URL, ignoring the SSH/HTTPS difference and port numbers, so `git@host:me/app.git` and `https://host/me/app` count as the same project.
+
 ## What is shared
 
 | Shared | Not shared |
@@ -73,6 +92,7 @@ Sync state is tracked per session as a hash of the last synced version. If only 
 ```
 python3 tests/test_paths.py   # path conversion for Windows / macOS / Linux
 bash tests/e2e.sh             # push / pull / conflicts / auto sync between two simulated devices
+bash tests/self_hosted.sh     # a self-hosted HTTPS git server with a self-signed certificate, and moving servers
 ```
 
 ## License

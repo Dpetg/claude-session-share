@@ -124,8 +124,9 @@ def encode_project_dir(cwd):
 
 
 def run(cmd, cwd=None, check=True):
-    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
+    # 認証の入力待ちで止まらないようにする (フックから呼ばれることもある)
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
     if check and r.returncode != 0:
         raise RuntimeError("{} 失敗:\n{}{}".format(" ".join(cmd), r.stdout, r.stderr))
     return r
@@ -272,10 +273,27 @@ def git_remote_key(path):
     url = r.stdout.strip()
     if r.returncode != 0 or not url:
         return None
-    url = re.sub(r"^[a-z+]+://", "", url)
-    url = re.sub(r"^[^@/]+@", "", url)
-    url = re.sub(r"\.git$", "", url).replace(":", "/")
-    return url.lower()
+    return normalize_remote(url)
+
+
+def normalize_remote(url):
+    """同じリポジトリを指す URL を、SSH / HTTPS・ポート番号の違いによらず同じキーにする。
+    例: git@git.example.com:me/app.git, ssh://git@git.example.com:2222/me/app,
+        https://git.example.com/me/app.git -> git.example.com/me/app"""
+    url = url.strip().rstrip("/")
+    m = re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://(?:[^@/]+@)?([^/:]+)(?::\d+)?(/.*)?$", url)
+    if m:
+        host, path = m.group(1), m.group(2) or ""
+    else:
+        m = re.match(r"^(?:[^@/]+@)?([^/:]+):(.*)$", url)  # scp 形式 user@host:path
+        if m and not re.match(r"^[A-Za-z]:[\\/]", url):
+            host, path = m.group(1), m.group(2)
+        else:
+            host, path = "local", url.replace("\\", "/")  # ローカルパス (NAS のマウント等)
+    path = re.sub(r"\.git$", "", path.rstrip("/"))
+    path = re.sub(r"^/*~[^/]*/", "", path)  # ssh://host/~user/repo
+    path = re.sub(r"/+", "/", path).strip("/")
+    return "{}/{}".format(host, path).lower()
 
 
 def safe_key(key):
@@ -744,31 +762,96 @@ def save_state(s):
 
 # ---------------------------------------------------------------- コマンド
 
+REMOTE_HINTS = """接続できない場合の確認点:
+  - SSH (git@host:path, ssh://host:port/path): `ssh -T git@<host>` が通るか。鍵を指定するなら init に --ssh-key <鍵のパス>
+  - HTTPS: `git ls-remote <URL>` が通るか。認証は git の credential helper で設定する
+  - 自己署名の証明書: init に --ca-cert <CA 証明書のパス>
+  - サーバ側に空のリポジトリがあるか (例: サーバで `git init --bare /srv/git/claude-sessions.git`)"""
+
+
+def store_git_config(st, args):
+    """このデバイスのストアにだけ効く接続設定 (共有はされない)。"""
+    if getattr(args, "ssh_key", None):
+        key = str(Path(args.ssh_key).expanduser().resolve()).replace("\\", "/")
+        run(["git", "config", "core.sshCommand", 'ssh -i "{}" -o IdentitiesOnly=yes'.format(key)], cwd=st)
+    if getattr(args, "ca_cert", None):
+        run(["git", "config", "http.sslCAInfo", str(Path(args.ca_cert).expanduser().resolve())], cwd=st)
+
+
+def git_env_args(args):
+    """接続確認・clone 用に、まだストアが無い段階でも同じ設定を -c で渡す。"""
+    out = []
+    if getattr(args, "ssh_key", None):
+        key = str(Path(args.ssh_key).expanduser().resolve()).replace("\\", "/")
+        out += ["-c", 'core.sshCommand=ssh -i "{}" -o IdentitiesOnly=yes'.format(key)]
+    if getattr(args, "ca_cert", None):
+        out += ["-c", "http.sslCAInfo={}".format(Path(args.ca_cert).expanduser().resolve())]
+    return out
+
+
 def cmd_init(args):
     cfg = load_json(ccshare_dir() / "config.json", {}) or {}
-    st = Path(args.store).expanduser().resolve() if args.store else ccshare_dir() / "store"
+    st = Path(args.store).expanduser().resolve() if args.store else Path(cfg.get("store") or ccshare_dir() / "store")
     cfg["store"] = str(st)
     cfg["backend"] = args.backend
     cfg.setdefault("device", args.device or "{}-{}".format(socket.gethostname().split(".")[0], os_name()))
     if args.backend == "git":
+        if args.remote:
+            # 先に接続を確かめる (認証や証明書の問題を、後の push で気付くのではなくここで出す)
+            env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+            r = subprocess.run(["git"] + git_env_args(args) + ["ls-remote", "--heads", args.remote],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
+            if r.returncode != 0:
+                sys.exit("ccshare: 共有先 {} に接続できませんでした:\n{}\n\n{}".format(
+                    args.remote, r.stderr.strip(), REMOTE_HINTS))
+            remote_empty = not r.stdout.strip()
         if args.remote and not (st / ".git").exists():
             if st.exists() and any(st.iterdir()):
                 sys.exit("ccshare: {} は空ではありません。".format(st))
             st.parent.mkdir(parents=True, exist_ok=True)
-            r = run(["git", "clone", args.remote, str(st)], check=False)
-            if r.returncode != 0:
+            if remote_empty:
                 st.mkdir(parents=True, exist_ok=True)
                 run(["git", "init", "-q"], cwd=st)
                 run(["git", "remote", "add", "origin", args.remote], cwd=st)
+            else:
+                run(["git"] + git_env_args(args) + ["clone", "-q", args.remote, str(st)])
         elif not (st / ".git").exists():
             st.mkdir(parents=True, exist_ok=True)
             run(["git", "init", "-q"], cwd=st)
+        elif args.remote:
+            cur = run(["git", "config", "--get", "remote.origin.url"], cwd=st, check=False).stdout.strip()
+            if cur and cur != args.remote:
+                # 共有先の引っ越し (例: GitHub -> 自前の git サーバ)。手元のストアの中身を新しい共有先へ送る
+                run(["git", "remote", "set-url", "origin", args.remote], cwd=st)
+                store_git_config(st, args)
+                if not remote_empty:
+                    # 他のデバイスが引っ越し済みの共有先なら、同じ履歴の続きなので受け入れる
+                    run(["git", "fetch", "-q", "origin"], cwd=st, check=False)
+                    same = run(["git", "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"], cwd=st, check=False)
+                    if same.returncode != 0:
+                        run(["git", "remote", "set-url", "origin", cur], cwd=st)
+                        sys.exit("ccshare: 新しい共有先 {} には別の内容が入っています。空のリポジトリか、"
+                                 "他のデバイスが引っ越しに使ったリポジトリを指定してください。".format(args.remote))
+                    run(["git", "pull", "-q", "--rebase", "--autostash", "origin", "HEAD"], cwd=st, check=False)
+                    run(["git", "branch", "-q", "--set-upstream-to=origin/" + run(
+                        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=st).stdout.strip()], cwd=st, check=False)
+                print("共有先を変更しました: {} -> {}".format(cur, args.remote))
+            elif not cur:
+                run(["git", "remote", "add", "origin", args.remote], cwd=st)
         run(["git", "config", "core.autocrlf", "false"], cwd=st)
+        store_git_config(st, args)
     st.mkdir(parents=True, exist_ok=True)
     ga = st / ".gitattributes"
     if not ga.exists():
         write_text(ga, "* -text\n")
     save_config(cfg)
+    if args.backend == "git" and args.remote and remote_empty:
+        if run(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=st, check=False).returncode != 0:
+            run(["git", "add", "-A"], cwd=st)
+            run(["git", "commit", "-q", "-m", "ccshare: init"], cwd=st)
+        r = run(["git", "push", "-q", "-u", "origin", "HEAD"], cwd=st, check=False)
+        if r.returncode != 0:
+            sys.exit("ccshare: 共有先への push に失敗しました:\n{}\n\n{}".format(r.stderr.strip(), REMOTE_HINTS))
     print("初期化しました: ストア={} ({}) デバイス={}".format(st, args.backend, cfg["device"]))
 
 
@@ -946,8 +1029,10 @@ def main():
     a = sp.add_parser("init", help="ストアを設定")
     a.add_argument("--store", help="共有先の手元コピーの場所 (既定: ~/.ccshare/store)")
     a.add_argument("--backend", choices=["git", "folder"], default="git")
-    a.add_argument("--remote", help="git リモート URL (GitHub の private リポジトリ等)")
+    a.add_argument("--remote", help="git リモート URL (GitHub 等の private リポジトリ、自前の git サーバ: git@host:path / ssh://host:port/path / https://...)")
     a.add_argument("--device", help="デバイス名 (既定: ホスト名-OS)")
+    a.add_argument("--ssh-key", help="共有先への SSH 接続に使う秘密鍵 (このデバイスだけの設定)")
+    a.add_argument("--ca-cert", help="自己署名の HTTPS サーバ用の CA 証明書 (このデバイスだけの設定)")
     a.set_defaults(fn=cmd_init)
     a = sp.add_parser("link", help="プロジェクトを登録")
     a.add_argument("path", nargs="?")

@@ -18,7 +18,7 @@ Windows / macOS / Linux、デュアルブートや複数の PC の間で、Claud
 
 - Claude Code
 - Python 3.8 以上 (標準ライブラリのみ使用。Windows は `py` でも可)
-- git と、共有先にする **private** の git リポジトリ (GitHub など)。または OneDrive / Dropbox / Google Drive などの同期フォルダ
+- git と、共有先にする **private** の git リポジトリ (GitHub、GitLab、自分でホストしている git サーバなど)。または OneDrive / Dropbox / Google Drive などの同期フォルダ
 - Windows では Git for Windows (Git Bash)
 
 ## インストール
@@ -47,6 +47,25 @@ Windows / macOS / Linux、デュアルブートや複数の PC の間で、Claud
 | `/session-share:auto [on\|off]` | 起動時 pull / 終了時 push の自動化 (デバイスごと) |
 | `/session-share:status` | 状態の確認 |
 
+## 自分の git サーバを使う
+
+`git` が接続できるリモートなら何でも使えます (Gitea、GitLab、SSH で入れるサーバ上の bare リポジトリ、NAS など)。
+
+```
+# サーバ側 (SSH で入れるサーバの場合)
+git init --bare /srv/git/claude-sessions.git
+
+# 各デバイスの Claude Code で
+/session-share:setup me@myserver:/srv/git/claude-sessions.git
+/session-share:setup ssh://git@git.example.com:2222/me/claude-sessions.git
+/session-share:setup https://git.example.com/me/claude-sessions.git
+```
+
+- 初期設定の最初に接続を確かめ、失敗したら理由と確認点を表示して止まります。
+- 専用の SSH 鍵や、自己署名証明書の HTTPS サーバ用の CA 証明書を使う場合は、スクリプトの `init` に `--ssh-key <秘密鍵>` / `--ca-cert <CA 証明書>` を付けます。設定はそのデバイスにだけ保存されます (`/session-share:setup` でその旨を伝えれば付けて実行します)。
+- 別のサーバへ引っ越すときは、新しい URL でもう一度 setup します。新しいリポジトリが空なら全体をコピーし、他のデバイスも同じコマンドで切り替えて続きから使えます。
+- プロジェクトは git の `origin` URL で対応付けます。SSH と HTTPS の違いやポート番号は無視するので、`git@host:me/app.git` と `https://host/me/app` は同じプロジェクトとして扱います。
+
 ## 共有されるもの・されないもの
 
 | 共有する | 共有しない |
@@ -73,6 +92,7 @@ session-share は、送るときに会話の中の絶対パス (プロジェク�
 ```
 python3 tests/test_paths.py   # Windows / macOS / Linux のパス変換
 bash tests/e2e.sh             # 2台のデバイスを模した push / pull / 競合 / 自動同期
+bash tests/self_hosted.sh     # 自己署名証明書の HTTPS git サーバと、共有先の引っ越し
 ```
 
 ## ライセンス

@@ -1,7 +1,7 @@
 """Windows <-> Linux/Mac のパス変換テスト: python3 tests/test_paths.py"""
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "plugins/session-share/scripts"))
-from ccshare import PathMapper, encode_project_dir
+from ccshare import PathMapper, encode_project_dir, normalize_remote
 
 win = PathMapper(r"C:\Users\shota\src\demo", r"C:\Users\shota", windows=True)
 lin = PathMapper("/home/shota/work/demo", "/home/shota", windows=False)
@@ -30,4 +30,16 @@ assert encode_project_dir(r"C:\Users\shota\src\demo") == "C--Users-shota-src-dem
 mac2 = PathMapper("/private/var/u/demo", "/Users/u", windows=False, aliases=["/var/u/demo"])
 assert mac2.to_store("/var/u/demo/a.py") == "{{CCSHARE_PROJECT}}/a.py"
 assert mac2.to_store("/private/var/u/demo/a.py") == "{{CCSHARE_PROJECT}}/a.py"
+# 同じリポジトリなら SSH / HTTPS・ポートの違いによらず同じプロジェクトとして扱う
+same = [
+    "git@git.example.com:me/app.git",
+    "ssh://git@git.example.com:2222/me/app.git",
+    "https://git.example.com/me/app",
+    "https://user@git.example.com:8443/me/app.git/",
+]
+assert {normalize_remote(u) for u in same} == {"git.example.com/me/app"}, [normalize_remote(u) for u in same]
+assert normalize_remote("git@github.com:Dpetg/Demo.git") == "github.com/dpetg/demo"
+assert normalize_remote("me@nas:/srv/git/app.git") == "nas/srv/git/app"
+assert normalize_remote("ssh://nas/~me/app.git") == "nas/app"
+assert normalize_remote(r"C:\git\app.git") == "local/c:/git/app"
 print("OK")
