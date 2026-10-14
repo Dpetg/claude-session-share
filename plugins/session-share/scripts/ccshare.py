@@ -209,10 +209,27 @@ def read_text(p):
 
 
 def write_text(p, s):
+    """書きかけのファイルをクラウドドライブ等に拾われないよう、一時ファイルに書いてから置き換える。
+    中身が同じなら書かない (クラウドドライブで無駄なアップロードが起きないように)。"""
     p = Path(p)
     p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "w", encoding="utf-8", errors="surrogateescape", newline="") as f:
-        f.write(s)
+    data = s.encode("utf-8", "surrogateescape")
+    try:
+        if p.stat().st_size == len(data) and p.read_bytes() == data:
+            return
+    except OSError:
+        pass
+    tmp = p.with_name(".{}.ccshare-tmp".format(p.name))
+    try:
+        tmp.write_bytes(data)
+        os.replace(str(tmp), str(p))
+    except OSError:
+        # Windows で相手のファイルが開かれていて置き換えられないときは、直接書く
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        p.write_bytes(data)
 
 
 def sha(s):
@@ -278,15 +295,39 @@ def write_stored(p, s):
             f.unlink()
 
 
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+
+
+def conflict_base(stem):
+    """クラウドドライブが作る競合コピーの名前なら、元の会話 ID を返す。
+    例: "<id> (1)" (Google Drive), "<id> (Shota's conflicted copy ...)" (Dropbox), "<id>-DESKTOP-ABC" (OneDrive)"""
+    m = UUID_RE.match(stem)
+    if m:
+        return m.group(0) if len(stem) > 36 else None
+    if " (" in stem:
+        return stem.split(" (", 1)[0]
+    return None
+
+
 def stored_sessions(d):
-    """ストアの sessions/ にある会話: {id: 論理パス}"""
+    """ストアの sessions/ にある会話: {id: 論理パス} (競合コピーは除く)"""
     d = Path(d)
     if not d.is_dir():
         return {}
-    out = {f.stem: f for f in d.glob("*.jsonl")}
+    out = {f.stem: f for f in d.glob("*.jsonl") if not conflict_base(f.stem)}
     for f in d.glob("*.jsonl.001"):
-        out.setdefault(f.name[: -len(".jsonl.001")], f.with_name(f.name[:-4]))
+        sid = f.name[: -len(".jsonl.001")]
+        if not conflict_base(sid):
+            out.setdefault(sid, f.with_name(f.name[:-4]))
     return out
+
+
+def conflict_copies(d):
+    """クラウドドライブの競合コピー: [(元の会話 ID, パス)]"""
+    d = Path(d)
+    if not d.is_dir():
+        return []
+    return sorted((conflict_base(f.stem), f) for f in d.glob("*.jsonl") if conflict_base(f.stem))
 
 
 # ---------------------------------------------------------------- 秘密情報
@@ -1098,10 +1139,26 @@ def pull_sessions(cfg, state, key, root, skip=()):
     to_store = store_converter(mapper, SecretFilter(secret_mode(cfg)), slimmer(cfg))
     to_local = lambda o: mapper.walk(o, mapper.to_local)
     pulled, forks = 0, []
+    for sid, src in conflict_copies(st):
+        # クラウドドライブが両方の版を残した: 会話の競合と同じく、別セッションとして取り込む
+        stored = read_stored(src)
+        if not stored.endswith("\n"):
+            continue
+        fid = str(uuid.uuid5(FORK_NS, sid + sha(stored)))
+        if fid in have or state_key(key, fid) in state["sessions"]:
+            continue
+        fork_obj = lambda o, fid=fid, sid=sid: rename_session(to_local(o), sid, fid)
+        text = convert_jsonl(stored, fork_obj)
+        dst = claude_dir() / "projects" / encode_project_dir(first_cwd_from_text(text) or root) / (fid + ".jsonl")
+        write_text(dst, text)
+        state["sessions"][state_key(key, fid)] = "conflict-copy"
+        forks.append((sid, fid))
     for sid, src in sorted(stored_sessions(st).items()):
         if sid in skip:
             continue  # 今開いているセッションは書き換えない
         stored = read_stored(src)
+        if stored and not stored.endswith("\n"):
+            continue  # クラウドドライブで同期の途中 (最後の行が欠けている)。次の pull で取り込む
         S = sha(stored)
         B = state["sessions"].get(state_key(key, sid))
         local_text = convert_jsonl(stored, to_local)
@@ -1201,9 +1258,18 @@ def git_env_args(args):
     return out
 
 
+STORE_DATA = ("config", "projects", "ccshare.json")
+
+
 def cmd_init(args):
     cfg = load_json(ccshare_dir() / "config.json", {}) or {}
-    st = Path(args.store).expanduser().resolve() if args.store else Path(cfg.get("store") or ccshare_dir() / "store")
+    prev = Path(cfg["store"]) if cfg.get("store") else None
+    if args.store:
+        st = Path(args.store).expanduser().resolve()
+    elif args.backend == "git" and cfg.get("backend") == "folder":
+        st = ccshare_dir() / "store"  # クラウドドライブの中に git のリポジトリは作らない
+    else:
+        st = Path(cfg.get("store") or ccshare_dir() / "store")
     cfg["store"] = str(st)
     cfg["backend"] = args.backend
     cfg.setdefault("device", args.device or "{}-{}".format(socket.gethostname().split(".")[0], os_name()))
@@ -1253,6 +1319,14 @@ def cmd_init(args):
         run(["git", "config", "core.autocrlf", "false"], cwd=st)
         store_git_config(st, args)
     st.mkdir(parents=True, exist_ok=True)
+    if prev and not same_path(str(prev), str(st)) and prev.is_dir() and not any((st / n).exists() for n in STORE_DATA):
+        # 共有先の引っ越し (例: GitHub -> クラウドドライブ)。前の共有先の手元コピーから中身を移す
+        for n in STORE_DATA:
+            if (prev / n).is_dir():
+                shutil.copytree(str(prev / n), str(st / n))
+            elif (prev / n).is_file():
+                shutil.copy2(str(prev / n), str(st / n))
+        print("前の共有先 ({}) の内容を移しました。".format(prev))
     ga = st / ".gitattributes"
     if not ga.exists():
         write_text(ga, "* -text\n")
@@ -1301,6 +1375,76 @@ def gh_repo(name):
     return url
 
 
+DRIVE_ALIASES = {"onedrive": "OneDrive", "dropbox": "Dropbox", "gdrive": "Google Drive", "googledrive": "Google Drive",
+                 "google": "Google Drive", "icloud": "iCloud Drive", "box": "Box"}
+STORE_DIR_NAME = "claude-sessions"
+
+
+def cloud_drives():
+    """このデバイスで見つかったクラウドドライブの同期フォルダ: [(種類, パス)]"""
+    h = home_dir()
+    found = []
+
+    def add(kind, p):
+        p = Path(p)
+        if p.is_dir() and all(not same_path(str(p), str(q)) for _k, q in found):
+            found.append((kind, p))
+    for var in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        if os.environ.get(var):
+            add("OneDrive", os.environ[var])
+    cs = h / "Library" / "CloudStorage"  # macOS (File Provider)
+    if cs.is_dir():
+        for d in sorted(cs.iterdir()):
+            n = d.name
+            if n.startswith("OneDrive"):
+                add("OneDrive", d)
+            elif n.startswith("Dropbox"):
+                add("Dropbox", d)
+            elif n.startswith("GoogleDrive"):
+                for sub in ("My Drive", "マイドライブ"):
+                    add("Google Drive", d / sub)
+            elif n.startswith("Box"):
+                add("Box", d)
+    add("iCloud Drive", h / "Library" / "Mobile Documents" / "com~apple~CloudDocs")
+    add("iCloud Drive", h / "iCloudDrive")
+    for kind, names in (("OneDrive", ["OneDrive"]), ("Dropbox", ["Dropbox"]), ("Box", ["Box"]),
+                        ("Google Drive", ["Google Drive", "GoogleDrive", "My Drive"])):
+        for n in names:
+            add(kind, h / n)
+    if is_windows():
+        # Google ドライブ パソコン版は G: などのドライブとして見える
+        for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
+            for sub in ("My Drive", "マイドライブ"):
+                p = Path(letter + ":\\") / sub
+                try:
+                    add("Google Drive", p)
+                except OSError:
+                    pass
+    return found
+
+
+def resolve_drive(name):
+    kind = DRIVE_ALIASES[name.lower()]
+    hits = [p for k, p in cloud_drives() if k == kind]
+    if not hits:
+        others = ", ".join("{} ({})".format(k, p) for k, p in cloud_drives()) or "なし"
+        sys.exit("ccshare: このデバイスで {} の同期フォルダが見つかりませんでした。見つかったもの: {}\n"
+                 "  同期フォルダの中のパスを直接指定してください (例: setup \"D:\\OneDrive\\{}\")。".format(
+                     kind, others, STORE_DIR_NAME))
+    if len(hits) > 1:
+        print("{} が複数あるので {} を使います (他: {})。".format(kind, hits[0], ", ".join(map(str, hits[1:]))))
+    return str(hits[0] / STORE_DIR_NAME)
+
+
+def cmd_drives(args):
+    drives = cloud_drives()
+    if not drives:
+        print("クラウドドライブの同期フォルダは見つかりませんでした。同期フォルダの中のパスを setup に直接指定できます。")
+    for kind, p in drives:
+        alias = next(a for a, k in DRIVE_ALIASES.items() if k == kind)
+        print("{:<13} {}  (setup {} で {} を使う)".format(kind, p, alias, Path(p) / STORE_DIR_NAME))
+
+
 def looks_like_remote(t):
     return bool(re.match(r"^[A-Za-z][\w+.-]*://", t) or re.match(r"^[^/\\\s]+@[^/\\\s]+:", t))
 
@@ -1318,6 +1462,8 @@ def cmd_setup(args):
                                   ssh_key=args.ssh_key, ca_cert=args.ca_cert)
         if not t:
             init.remote = gh_repo(args.name or GH_DEFAULT_REPO)
+        elif t.lower() in DRIVE_ALIASES:
+            init.backend, init.store = "folder", resolve_drive(t)
         elif looks_like_remote(t):
             init.remote = t
         elif not Path(t).expanduser().exists() and re.fullmatch(r"[\w.-]+/[\w.-]+", t):
@@ -1328,7 +1474,8 @@ def cmd_setup(args):
         cfg = load_config()
         store_fetch(cfg)
         sync = argparse.Namespace(project=None, all=False, no_settings=False, quiet_hook=False)
-        if store_config_empty(cfg):
+        projects = store_path(cfg) / "projects"
+        if store_config_empty(cfg) and not (projects.is_dir() and any(projects.iterdir())):
             print("共有先は空なので、このデバイスの設定と会話を送ります (1台目)。")
             cmd_push(argparse.Namespace(cmd="push", **vars(sync)))
         else:
@@ -1616,13 +1763,15 @@ def main():
     ap = argparse.ArgumentParser(prog="ccshare", description="Claude Code セッション共有")
     sp = ap.add_subparsers(dest="cmd", required=True)
     a = sp.add_parser("setup", help="初期設定をまとめて行う (共有先の用意・取り込みまたは送信・自動同期)")
-    a.add_argument("target", nargs="?", help="git リモート URL / owner/repo / フォルダ (省略時は gh で private リポジトリを用意)")
+    a.add_argument("target", nargs="?", help="git リモート URL / owner/repo / onedrive・dropbox・gdrive・icloud・box / "
+                   "フォルダ (省略時は gh で private リポジトリを用意)")
     a.add_argument("--name", help="gh で用意するリポジトリ名 (既定: claude-sessions)")
     a.add_argument("--device", help="デバイス名 (既定: ホスト名-OS)")
     a.add_argument("--ssh-key", help="共有先への SSH 接続に使う秘密鍵 (このデバイスだけの設定)")
     a.add_argument("--ca-cert", help="自己署名の HTTPS サーバ用の CA 証明書 (このデバイスだけの設定)")
     a.add_argument("--no-auto", action="store_true", help="自動同期をオンにしない")
     a.set_defaults(fn=cmd_setup)
+    sp.add_parser("drives", help="このデバイスのクラウドドライブの同期フォルダを探す").set_defaults(fn=cmd_drives)
     a = sp.add_parser("init", help="ストアを設定")
     a.add_argument("--store", help="共有先の手元コピーの場所 (既定: ~/.ccshare/store)")
     a.add_argument("--backend", choices=["git", "folder"], default="git")

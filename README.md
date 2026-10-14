@@ -35,13 +35,14 @@ Project files themselves are expected to be shared with Git. This plugin only sh
 
 1. On each device, install the plugin and run `/session-share:setup` in the directory of a project you want to share.
    - If you are logged in to the [GitHub CLI (gh)](https://cli.github.com/), this creates the private repository `<you>/claude-sessions` (or reuses it on later devices), pushes from the first device or pulls on later ones, and turns on auto sync (pull on start, push on exit), all in one step.
-   - Without gh, pass the URL of an empty **private** repository or a synced cloud-drive folder: `/session-share:setup https://github.com/<you>/claude-sessions`
+   - To use a cloud drive, run `/session-share:setup onedrive` (or `dropbox`, `gdrive`, `icloud`, `box`). It finds that drive's synced folder on the device and uses a `claude-sessions` folder inside it. If it can't find it, pass the path instead: `/session-share:setup "D:\OneDrive\claude-sessions"`
+   - To use git without gh, pass the URL of an empty **private** repository: `/session-share:setup https://github.com/<you>/claude-sessions`
 2. For other projects, run `/session-share:push` once in their directory; after that they sync automatically.
 3. Open a pulled conversation with `claude --resume` (or `/resume`).
 
 | Command | What it does |
 |---|---|
-| `/session-share:setup [URL\|owner/repo\|folder]` | Initial setup (with no argument, creates a private repository with gh) |
+| `/session-share:setup [onedrive\|dropbox\|gdrive\|icloud\|box\|URL\|owner/repo\|folder]` | Initial setup (with no argument, creates a private repository with gh) |
 | `/session-share:pull` | Pull conversations and settings from other devices |
 | `/session-share:push` | Push this device's conversations and settings |
 | `/session-share:list` | List shared conversations |
@@ -52,6 +53,15 @@ Project files themselves are expected to be shared with Git. This plugin only sh
 | `/session-share:slim [hooks\|images] [on\|off]` | Trim hook output and images from the shared copy |
 | `/session-share:prune [--older-than DAYS] [--squash]` | Remove old conversations from the sync repository / squash its history |
 | `/session-share:status` | Show the current state |
+
+## Using a cloud drive
+
+The synced folder of OneDrive, Dropbox, Google Drive, iCloud Drive or Box can be the sync target. No git or GitHub account is needed.
+
+- `/session-share:setup onedrive` (and so on) looks for that drive's synced folder on the device: `%OneDrive%` on Windows, `~/Library/CloudStorage/...` on macOS, `G:\My Drive` for Google Drive for desktop, and similar. `drives` lists what it finds.
+- Files are written through a temporary file, and files whose content did not change are not rewritten, so other devices don't pick up half-written files and unchanged files aren't uploaded again. A conversation whose last line is incomplete (still syncing) is skipped until the next pull.
+- If two devices push the same conversation at once and the drive keeps a conflict copy (`<id> (1).jsonl`, `<id>-DESKTOP-XXX.jsonl`, ...), it is pulled in as a separate session, just like a git conflict.
+- Unlike git, no history is kept. To move from GitHub, run `/session-share:setup onedrive`; the current contents are copied over.
 
 ## Using your own git server
 
@@ -122,6 +132,7 @@ python3 tests/test_paths.py   # path conversion for Windows / macOS / Linux
 bash tests/e2e.sh             # push / pull / conflicts / auto sync between two simulated devices
 bash tests/self_hosted.sh     # a self-hosted HTTPS git server with a self-signed certificate, and moving servers
 bash tests/features.sh        # secret masking, memory sharing, prune and squash
+bash tests/folder.sh          # cloud drive (synced folder): sharing, conflict copies, moving from git
 bash tests/setup.sh           # setup with no argument (creates the repository with gh)
 bash tests/large.sh           # splitting large conversations, and recovering from a rejected push
 ```

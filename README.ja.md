@@ -35,13 +35,14 @@ Windows / macOS / Linux、デュアルブートや複数の PC の間で、Claud
 
 1. 各デバイスでプラグインを入れ、共有したいプロジェクトのディレクトリで `/session-share:setup` を実行する。
    - [GitHub CLI (gh)](https://cli.github.com/) にログイン済みなら、private リポジトリ `<you>/claude-sessions` を作り (2台目以降は既存のものを使い)、1台目なら送信、2台目以降なら取り込み、自動同期 (起動時 pull・終了時 push) のオンまでをまとめて行います。
-   - gh を使わない場合は、空の **private** リポジトリの URL か、クラウドドライブのフォルダを渡します: `/session-share:setup https://github.com/<you>/claude-sessions`
+   - クラウドドライブを使う場合は `/session-share:setup onedrive` (`dropbox` / `gdrive` / `icloud` / `box` も可)。そのデバイスの同期フォルダを探して、中の `claude-sessions` フォルダを共有先にします。見つからないときは `/session-share:setup "D:\OneDrive\claude-sessions"` のようにパスを直接渡します。
+   - gh を使わずに git を使う場合は、空の **private** リポジトリの URL を渡します: `/session-share:setup https://github.com/<you>/claude-sessions`
 2. ほかのプロジェクトは、そのディレクトリで一度 `/session-share:push` すれば、以後は自動で同期されます。
 3. 取り込んだ会話は `claude --resume` (または `/resume`) から開く。
 
 | コマンド | 内容 |
 |---|---|
-| `/session-share:setup [URL\|owner/repo\|フォルダ]` | 初期設定 (省略時は gh で private リポジトリを用意) |
+| `/session-share:setup [onedrive\|dropbox\|gdrive\|icloud\|box\|URL\|owner/repo\|フォルダ]` | 初期設定 (省略時は gh で private リポジトリを用意) |
 | `/session-share:pull` | 他のデバイスの会話と設定を取り込む |
 | `/session-share:push` | このデバイスの会話と設定を送る |
 | `/session-share:list` | 共有されている会話の一覧 |
@@ -52,6 +53,15 @@ Windows / macOS / Linux、デュアルブートや複数の PC の間で、Claud
 | `/session-share:slim [hooks\|images] [on\|off]` | 共有先のコピーからフックの出力・画像を削る |
 | `/session-share:prune [--older-than 日数] [--squash]` | 共有先から古い会話を外す / 履歴を作り直す |
 | `/session-share:status` | 状態の確認 |
+
+## クラウドドライブを使う
+
+OneDrive、Dropbox、Google ドライブ、iCloud Drive、Box の同期フォルダを共有先にできます。git や GitHub のアカウントは要りません。
+
+- `/session-share:setup onedrive` のように種類を指定すると、そのデバイスの同期フォルダ (Windows の `%OneDrive%`、macOS の `~/Library/CloudStorage/...`、Google ドライブ パソコン版の `G:\マイドライブ` など) を探します。見つかったものは `drives` で確認できます。
+- 書き込みは一時ファイル経由で行い、中身が変わらないファイルは書き直さないので、同期の途中のファイルを拾ったり、無駄なアップロードが起きたりしにくくしています。最後の行が欠けている (同期の途中の) 会話は、次の pull まで取り込みを待ちます。
+- 2 台で同じ会話を同時に送って、クラウドドライブが競合コピー (`<ID> (1).jsonl`、`<ID>-DESKTOP-XXX.jsonl` など) を作った場合は、git の競合と同じく別のセッションとして取り込みます。
+- git と違って履歴は残りません。共有先を GitHub から移すときは、`/session-share:setup onedrive` を実行すれば今の内容がそのまま移ります。
 
 ## 自分の git サーバを使う
 
@@ -122,6 +132,7 @@ python3 tests/test_paths.py   # Windows / macOS / Linux のパス変換
 bash tests/e2e.sh             # 2台のデバイスを模した push / pull / 競合 / 自動同期
 bash tests/self_hosted.sh     # 自己署名証明書の HTTPS git サーバと、共有先の引っ越し
 bash tests/features.sh        # 秘密情報の伏せ字、メモリの共有、prune と squash
+bash tests/folder.sh          # クラウドドライブ (同期フォルダ) の共有・競合コピー・引っ越し
 bash tests/setup.sh           # 引数なしの setup (gh でリポジトリを用意)
 bash tests/large.sh           # 大きな会話の分割と、push を拒否されたときの立ち直り
 ```

@@ -1,7 +1,9 @@
 """Windows <-> Linux/Mac のパス変換テスト: python3 tests/test_paths.py"""
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "plugins/session-share/scripts"))
-from ccshare import PathMapper, encode_project_dir, normalize_remote, SecretFilter
+import os, tempfile
+import ccshare
+from ccshare import PathMapper, encode_project_dir, normalize_remote, SecretFilter, conflict_base, cloud_drives, write_text
 
 win = PathMapper(r"C:\Users\shota\src\demo", r"C:\Users\shota", windows=True)
 lin = PathMapper("/home/shota/work/demo", "/home/shota", windows=False)
@@ -50,4 +52,21 @@ assert f("const apiKey = process.env.API_KEY_VALUE;") == "const apiKey = process
 assert f("set ACCESS_TOKEN=proxy-injected-value") == "set ACCESS_TOKEN=proxy-injected-value"
 assert f("token: ${{ secrets.GITHUB_TOKEN }}") == "token: ${{ secrets.GITHUB_TOKEN }}"
 assert "REDACTED" in f("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----")
+# クラウドドライブの競合コピーの名前
+U = "11111111-2222-3333-4444-555555555555"
+assert conflict_base(U) is None
+assert conflict_base(U + " (1)") == U
+assert conflict_base(U + " (Shota's conflicted copy 2026-10-14)") == U
+assert conflict_base(U + "-DESKTOP-AB12CD") == U
+assert conflict_base("s1") is None and conflict_base("s1 (1)") == "s1"
+# 同期フォルダの検出 (OneDrive は環境変数、Dropbox はホーム直下) と、一時ファイル経由の書き込み
+with tempfile.TemporaryDirectory() as h:
+    os.makedirs(os.path.join(h, "Dropbox"))
+    os.makedirs(os.path.join(h, "od"))
+    os.environ.update(CCSHARE_HOME_OVERRIDE=h, OneDrive=os.path.join(h, "od"))
+    kinds = {k: str(p) for k, p in cloud_drives()}
+    assert kinds.get("Dropbox") == os.path.join(h, "Dropbox") and kinds.get("OneDrive") == os.path.join(h, "od"), kinds
+    f = os.path.join(h, "Dropbox", "a", "x.jsonl")
+    write_text(f, "one\n"); write_text(f, "two\n")
+    assert open(f).read() == "two\n" and os.listdir(os.path.dirname(f)) == ["x.jsonl"]
 print("OK")
